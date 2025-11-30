@@ -7,18 +7,22 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db_session
+from app.api.deps import get_db_session, get_redis
 from app.api.deps_beta import require_beta_user
 from app.models.user import User
 from app.services.kiro_service import KiroService
 from app.schemas.kiro import KiroOAuthAuthorizeRequest
+from app.cache import RedisClient
 
 router = APIRouter(prefix="/api/kiro", tags=["Kiro账号管理 (Beta)"])
 
 
-def get_kiro_service(db: AsyncSession = Depends(get_db_session)) -> KiroService:
-    """获取Kiro服务实例"""
-    return KiroService(db)
+def get_kiro_service(
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis)
+) -> KiroService:
+    """获取Kiro服务实例（带Redis缓存支持）"""
+    return KiroService(db, redis)
 
 
 # ==================== Kiro OAuth ====================

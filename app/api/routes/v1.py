@@ -10,18 +10,22 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps_flexible import get_user_flexible
-from app.api.deps import get_plugin_api_service, get_db_session
+from app.api.deps import get_plugin_api_service, get_db_session, get_redis
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService
 from app.schemas.plugin_api import ChatCompletionRequest
+from app.cache import RedisClient
 
 
 router = APIRouter(prefix="/v1", tags=["OpenAI兼容API"])
 
-def get_kiro_service(db: AsyncSession = Depends(get_db_session)) -> KiroService:
-    """获取Kiro服务实例"""
-    return KiroService(db)
+def get_kiro_service(
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis)
+) -> KiroService:
+    """获取Kiro服务实例（带Redis缓存支持）"""
+    return KiroService(db, redis)
 
 
 @router.get(

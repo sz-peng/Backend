@@ -1,6 +1,10 @@
 """
 Plug-in API密钥仓储层
 处理plugin_api_keys表的数据库操作
+
+重要说明：
+- Repository 层不应该调用 commit()，事务管理由调用方（依赖注入）统一处理
+- 这样可以避免连接被长时间占用，防止连接池耗尽
 """
 from typing import Optional
 from datetime import datetime
@@ -60,6 +64,8 @@ class PluginAPIKeyRepository:
         """
         创建新的API密钥记录
         
+        注意：不调用 commit()，由调用方统一管理事务
+        
         Args:
             user_id: 用户ID
             api_key: 加密后的API密钥
@@ -76,7 +82,7 @@ class PluginAPIKeyRepository:
         )
         
         self.db.add(plugin_api_key)
-        await self.db.commit()
+        await self.db.flush()  # 刷新以获取ID，但不提交事务
         await self.db.refresh(plugin_api_key)
         
         return plugin_api_key
@@ -88,6 +94,8 @@ class PluginAPIKeyRepository:
     ) -> PluginAPIKey:
         """
         更新API密钥信息
+        
+        注意：不调用 commit()，由调用方统一管理事务
         
         Args:
             user_id: 用户ID
@@ -113,25 +121,36 @@ class PluginAPIKeyRepository:
         )
         
         result = await self.db.execute(stmt)
-        await self.db.commit()
+        # 不调用 commit()，由调用方统一管理事务
         
         return result.scalar_one()
     
-    async def update_last_used(self, user_id: int) -> PluginAPIKey:
+    async def update_last_used(self, user_id: int) -> Optional[PluginAPIKey]:
         """
         更新最后使用时间
+        
+        注意：此方法用于高频调用场景，如果记录不存在则静默返回 None
         
         Args:
             user_id: 用户ID
             
         Returns:
-            更新后的PluginAPIKey对象
+            更新后的PluginAPIKey对象，不存在返回None
         """
-        return await self.update(user_id, last_used_at=datetime.utcnow())
+        stmt = (
+            update(PluginAPIKey)
+            .where(PluginAPIKey.user_id == user_id)
+            .values(last_used_at=datetime.utcnow())
+            .returning(PluginAPIKey)
+        )
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
     
     async def delete(self, user_id: int) -> bool:
         """
         删除API密钥
+        
+        注意：不调用 commit()，由调用方统一管理事务
         
         Args:
             user_id: 用户ID
@@ -141,7 +160,7 @@ class PluginAPIKeyRepository:
         """
         stmt = delete(PluginAPIKey).where(PluginAPIKey.user_id == user_id)
         result = await self.db.execute(stmt)
-        await self.db.commit()
+        # 不调用 commit()，由调用方统一管理事务
         
         return result.rowcount > 0
     

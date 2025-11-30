@@ -108,7 +108,8 @@ async def get_user_service(
 
 
 async def get_plugin_api_service(
-    db: AsyncSession = Depends(get_db_session)
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis)
 ) -> PluginAPIService:
     """
     获取Plug-in API服务
@@ -116,7 +117,7 @@ async def get_plugin_api_service(
     Returns:
         PluginAPIService: Plug-in API服务实例
     """
-    return PluginAPIService(db)
+    return PluginAPIService(db, redis)
 
 
 # ==================== 认证依赖 ====================

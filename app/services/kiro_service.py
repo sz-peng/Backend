@@ -2,14 +2,26 @@
 Kiro账号服务
 通过插件API管理Kiro账号，不直接操作数据库
 所有Kiro账号数据存储在插件API系统中
+
+优化说明：
+- 添加 Redis 缓存以减少数据库查询
+- plugin_api_key 缓存 TTL 为 60 秒
 """
 from typing import Optional, Dict, Any, List
 import httpx
+import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.repositories.plugin_api_key_repository import PluginAPIKeyRepository
 from app.utils.encryption import decrypt_api_key
+from app.cache import get_redis_client, RedisClient
+
+logger = logging.getLogger(__name__)
+
+# 缓存 TTL（秒）
+PLUGIN_API_KEY_CACHE_TTL = 60
+
 
 class KiroService:
     """Kiro账号服务类- 通过插件API管理"""
@@ -23,21 +35,36 @@ class KiroService:
         "claude-haiku-4-5-20251001",
     ]
     
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, redis: Optional[RedisClient] = None):
         """
         初始化服务
         
         Args:
             db: 数据库会话
+            redis: Redis 客户端（可选，用于缓存）
         """
         self.db = db
         self.settings = get_settings()
         self.plugin_api_key_repo = PluginAPIKeyRepository(db)
         self.base_url = self.settings.plugin_api_base_url
+        self._redis = redis
+    
+    @property
+    def redis(self) -> RedisClient:
+        """获取 Redis 客户端"""
+        if self._redis is None:
+            self._redis = get_redis_client()
+        return self._redis
+    
+    def _get_cache_key(self, user_id: int) -> str:
+        """生成缓存键"""
+        return f"plugin_api_key:{user_id}"
     
     async def _get_user_plugin_key(self, user_id: int) -> str:
         """
         获取用户的插件API密钥
+        
+        优化：使用 Redis 缓存减少数据库查询
         
         Args:
             user_id: 用户ID
@@ -45,11 +72,33 @@ class KiroService:
         Returns:
             解密后的插件API密钥
         """
+        cache_key = self._get_cache_key(user_id)
+        
+        # 尝试从缓存获取
+        try:
+            cached_key = await self.redis.get(cache_key)
+            if cached_key:
+                logger.debug(f"从缓存获取 plugin_api_key (kiro): user_id={user_id}")
+                return cached_key
+        except Exception as e:
+            logger.warning(f"Redis 缓存读取失败: {e}")
+        
+        # 缓存未命中，从数据库获取
         key_record = await self.plugin_api_key_repo.get_by_user_id(user_id)
         if not key_record or not key_record.is_active:
             raise ValueError("用户未配置插件API密钥")
         
-        return decrypt_api_key(key_record.api_key)
+        # 解密
+        decrypted_key = decrypt_api_key(key_record.api_key)
+        
+        # 存入缓存
+        try:
+            await self.redis.set(cache_key, decrypted_key, expire=PLUGIN_API_KEY_CACHE_TTL)
+            logger.debug(f"plugin_api_key 已缓存 (kiro): user_id={user_id}, ttl={PLUGIN_API_KEY_CACHE_TTL}s")
+        except Exception as e:
+            logger.warning(f"Redis 缓存写入失败: {e}")
+        
+        return decrypted_key
     
     async def _proxy_request(
         self,

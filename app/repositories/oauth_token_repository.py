@@ -1,6 +1,10 @@
 """
 OAuth 令牌数据仓储
 提供 OAuth 令牌数据的增删改查操作
+
+重要说明：
+- Repository 层不应该调用 commit()，事务管理由调用方（依赖注入）统一处理
+- 这样可以避免连接被长时间占用，防止连接池耗尽
 """
 from typing import Optional
 from datetime import datetime
@@ -65,6 +69,8 @@ class OAuthTokenRepository:
         """
         创建新的 OAuth 令牌记录
         
+        注意：不调用 commit()，由调用方统一管理事务
+        
         Args:
             user_id: 用户 ID
             access_token: 访问令牌
@@ -84,7 +90,7 @@ class OAuthTokenRepository:
         )
         
         self.db.add(oauth_token)
-        await self.db.commit()
+        await self.db.flush()  # 刷新以获取ID，但不提交事务
         await self.db.refresh(oauth_token)
         
         return oauth_token
@@ -100,6 +106,8 @@ class OAuthTokenRepository:
         """
         更新用户的 OAuth 令牌
         如果令牌不存在则创建新记录
+        
+        注意：不调用 commit()，由调用方统一管理事务
         
         Args:
             user_id: 用户 ID
@@ -121,7 +129,7 @@ class OAuthTokenRepository:
             existing_token.token_type = token_type
             existing_token.expires_at = expires_at
             
-            await self.db.commit()
+            await self.db.flush()  # 刷新但不提交
             await self.db.refresh(existing_token)
             
             return existing_token
@@ -139,6 +147,8 @@ class OAuthTokenRepository:
         """
         删除用户的 OAuth 令牌
         
+        注意：不调用 commit()，由调用方统一管理事务
+        
         Args:
             user_id: 用户 ID
             
@@ -150,7 +160,7 @@ class OAuthTokenRepository:
             return False
         
         await self.db.delete(oauth_token)
-        await self.db.commit()
+        await self.db.flush()  # 刷新但不提交
         
         return True
     
