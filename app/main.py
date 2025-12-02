@@ -132,6 +132,31 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
         """处理数据验证异常"""
+        # 检查是否是 Anthropic API 端点
+        if request.url.path.startswith("/v1/messages"):
+            # 返回 Anthropic 格式的错误响应
+            error_details = exc.errors()
+            error_messages = []
+            for error in error_details:
+                loc = " -> ".join(str(l) for l in error.get("loc", []))
+                msg = error.get("msg", "Unknown error")
+                error_messages.append(f"{loc}: {msg}")
+            
+            logging.getLogger(__name__).error(
+                f"[Anthropic API] 请求验证失败: path={request.url.path}, errors={error_details}"
+            )
+            
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": f"请求验证失败: {'; '.join(error_messages)}"
+                    }
+                }
+            )
+        
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={

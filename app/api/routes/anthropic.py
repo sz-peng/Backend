@@ -84,6 +84,9 @@ async def create_message(
     - 内部转换为OpenAI格式调用plug-in-api
     - 将响应转换回Anthropic格式返回
     """
+    # 记录请求信息用于调试
+    logger.info(f"[Anthropic API] 收到请求: model={request.model}, stream={request.stream}, user_id={current_user.id}")
+    
     try:
         # 生成请求ID
         request_id = uuid.uuid4().hex[:24]
