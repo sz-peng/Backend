@@ -120,7 +120,7 @@ async def submit_oauth_callback(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"提交OAuth回调失败"
+            detail=f"登录失败：{str(e)}"
         )
 
 
