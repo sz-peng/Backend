@@ -395,7 +395,15 @@ class PluginAPIService:
         )
     
     async def get_accounts(self, user_id: int) -> Dict[str, Any]:
-        """获取账号列表"""
+        """
+        获取账号列表
+        
+        返回用户在plug-in-api中的所有账号信息，包括：
+        - project_id_0: 项目ID
+        - is_restricted: 是否受限
+        - ineligible: 是否不合格
+        以及其他账号相关字段
+        """
         return await self.proxy_request(
             user_id=user_id,
             method="GET",
