@@ -129,7 +129,7 @@ async def submit_oauth_callback(
 @router.get(
     "/accounts",
     summary="获取账号列表",
-    description="获取用户在plug-in-api中的所有账号"
+    description="获取用户在plug-in-api中的所有账号，包括project_id_0、is_restricted、ineligible等完整信息"
 )
 async def get_accounts(
     current_user: User = Depends(get_current_user),

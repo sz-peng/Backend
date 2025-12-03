@@ -110,11 +110,7 @@ async def create_message(
         # 准备额外的请求头
         extra_headers = {}
         if config_type:
-            extra_headers["X-Account-Type"] = config_type
-        
-        # 记录转换后的请求（调试用）
-        logger.debug(f"Anthropic -> OpenAI request conversion: {openai_request}")
-        
+            extra_headers["X-Account-Type"] = config_type  
         # 如果是流式请求
         if request.stream:
             async def generate():
