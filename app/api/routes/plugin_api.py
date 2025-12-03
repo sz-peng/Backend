@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import get_current_user, get_plugin_api_service
+from app.api.deps import get_current_user, get_user_from_api_key, get_plugin_api_service
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.schemas.plugin_api import (
@@ -18,6 +18,7 @@ from app.schemas.plugin_api import (
     OAuthCallbackRequest,
     UpdateCookiePreferenceRequest,
     UpdateAccountStatusRequest,
+    UpdateAccountNameRequest,
     ChatCompletionRequest,
     PluginAPIResponse,
 )
@@ -71,6 +72,12 @@ async def get_oauth_authorize_url(
 ):
     """获取OAuth授权URL"""
     try:
+        print(f"📤 [oauth/authorize] 用户传入内容:")
+        print(f"   user_id: {current_user.id}")
+        print(f"   username: {current_user.username}")
+        print(f"   request: {request.model_dump()}")
+        print(f"   is_shared: {request.is_shared}")
+        
         result = await service.get_oauth_authorize_url(
             user_id=current_user.id,
             is_shared=request.is_shared
@@ -230,6 +237,37 @@ async def delete_account(
         )
 
 
+@router.put(
+    "/accounts/{cookie_id}/name",
+    summary="更新账号名称",
+    description="修改指定账号的名称"
+)
+async def update_account_name(
+    cookie_id: str,
+    request: UpdateAccountNameRequest,
+    current_user: User = Depends(get_current_user),
+    service: PluginAPIService = Depends(get_plugin_api_service)
+):
+    """更新账号名称"""
+    try:
+        result = await service.update_account_name(
+            user_id=current_user.id,
+            cookie_id=cookie_id,
+            name=request.name
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"更新账号名称失败"
+        )
+
+
 @router.get(
     "/accounts/{cookie_id}/quotas",
     summary="获取账号配额",
@@ -385,12 +423,14 @@ async def get_quota_consumption(
     description="获取可用的AI模型列表"
 )
 async def get_models(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_user_from_api_key),
     service: PluginAPIService = Depends(get_plugin_api_service)
 ):
     """获取模型列表"""
     try:
-        result = await service.get_models(current_user.id)
+        # 获取 config_type（通过 API key 认证时会设置）
+        config_type = getattr(current_user, '_config_type', None)
+        result = await service.get_models(current_user.id, config_type=config_type)
         return result
     except ValueError as e:
         raise HTTPException(
@@ -411,11 +451,23 @@ async def get_models(
 )
 async def chat_completions(
     request: ChatCompletionRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_user_from_api_key),
     service: PluginAPIService = Depends(get_plugin_api_service)
 ):
     """聊天补全"""
     try:
+        # 获取 config_type（通过 API key 认证时会设置）
+        config_type = getattr(current_user, '_config_type', None)
+        print(f"🔍 [plugin_api.py] Current user ID: {current_user.id}")
+        print(f"🔍 [plugin_api.py] Current user object attributes: {dir(current_user)}")
+        print(f"🔍 [plugin_api.py] Has _config_type: {hasattr(current_user, '_config_type')}")
+        print(f"🔍 [plugin_api.py] Config type value: {config_type}")
+        
+        # 准备额外的请求头
+        extra_headers = {}
+        if config_type:
+            extra_headers["X-Account-Type"] = config_type
+        
         # 如果是流式请求
         if request.stream:
             async def generate():
@@ -423,7 +475,8 @@ async def chat_completions(
                     user_id=current_user.id,
                     method="POST",
                     path="/v1/chat/completions",
-                    json_data=request.model_dump()
+                    json_data=request.model_dump(),
+                    extra_headers=extra_headers if extra_headers else None
                 ):
                     yield chunk
             
@@ -437,7 +490,8 @@ async def chat_completions(
                 user_id=current_user.id,
                 method="POST",
                 path="/v1/chat/completions",
-                json_data=request.model_dump()
+                json_data=request.model_dump(),
+                extra_headers=extra_headers if extra_headers else None
             )
             return result
     except ValueError as e:

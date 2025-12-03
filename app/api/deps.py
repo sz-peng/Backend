@@ -108,7 +108,8 @@ async def get_user_service(
 
 
 async def get_plugin_api_service(
-    db: AsyncSession = Depends(get_db_session)
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis)
 ) -> PluginAPIService:
     """
     获取Plug-in API服务
@@ -116,7 +117,7 @@ async def get_plugin_api_service(
     Returns:
         PluginAPIService: Plug-in API服务实例
     """
-    return PluginAPIService(db)
+    return PluginAPIService(db, redis)
 
 
 # ==================== 认证依赖 ====================
@@ -257,6 +258,11 @@ async def get_user_from_api_key(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="用户账号已被禁用"
             )
+        
+        # 将config_type附加到user对象上，供路由使用
+        print(f"🔍 [deps.py] API Key ID: {key_record.id}, User ID: {key_record.user_id}, Config Type from DB: {key_record.config_type}")
+        user._config_type = key_record.config_type
+        print(f"🔍 [deps.py] Set user._config_type to: {user._config_type}")
         
         return user
         

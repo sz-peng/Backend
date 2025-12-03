@@ -1,9 +1,14 @@
 """
 Plug-in API服务
 处理与plug-in-api系统的通信
+
+优化说明：
+- 添加 Redis 缓存以减少数据库查询
+- plugin_api_key 缓存 TTL 为 60 秒
 """
 from typing import Optional, Dict, Any, List
 import httpx
+import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -14,23 +19,42 @@ from app.schemas.plugin_api import (
     PluginAPIKeyResponse,
     CreatePluginUserRequest,
 )
+from app.cache import get_redis_client, RedisClient
+
+logger = logging.getLogger(__name__)
+
+# 缓存 TTL（秒）
+PLUGIN_API_KEY_CACHE_TTL = 60
 
 
 class PluginAPIService:
     """Plug-in API服务类"""
     
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, redis: Optional[RedisClient] = None):
         """
         初始化服务
         
         Args:
             db: 数据库会话
+            redis: Redis 客户端（可选，用于缓存）
         """
         self.db = db
         self.settings = get_settings()
         self.repo = PluginAPIKeyRepository(db)
         self.base_url = self.settings.plugin_api_base_url
         self.admin_key = self.settings.plugin_api_admin_key
+        self._redis = redis
+    
+    @property
+    def redis(self) -> RedisClient:
+        """获取 Redis 客户端"""
+        if self._redis is None:
+            self._redis = get_redis_client()
+        return self._redis
+    
+    def _get_cache_key(self, user_id: int) -> str:
+        """生成缓存键"""
+        return f"plugin_api_key:{user_id}"
     
     # ==================== 密钥管理 ====================
     
@@ -78,18 +102,41 @@ class PluginAPIService:
         """
         获取用户的解密后的API密钥
         
+        优化：使用 Redis 缓存减少数据库查询
+        
         Args:
             user_id: 用户ID
             
         Returns:
             解密后的API密钥，不存在返回None
         """
+        cache_key = self._get_cache_key(user_id)
+        
+        # 尝试从缓存获取
+        try:
+            cached_key = await self.redis.get(cache_key)
+            if cached_key:
+                logger.debug(f"从缓存获取 plugin_api_key: user_id={user_id}")
+                return cached_key
+        except Exception as e:
+            logger.warning(f"Redis 缓存读取失败: {e}")
+        
+        # 缓存未命中，从数据库获取
         key_record = await self.repo.get_by_user_id(user_id)
         if not key_record or not key_record.is_active:
             return None
         
-        # 解密并返回
-        return decrypt_api_key(key_record.api_key)
+        # 解密
+        decrypted_key = decrypt_api_key(key_record.api_key)
+        
+        # 存入缓存
+        try:
+            await self.redis.set(cache_key, decrypted_key, expire=PLUGIN_API_KEY_CACHE_TTL)
+            logger.debug(f"plugin_api_key 已缓存: user_id={user_id}, ttl={PLUGIN_API_KEY_CACHE_TTL}s")
+        except Exception as e:
+            logger.warning(f"Redis 缓存写入失败: {e}")
+        
+        return decrypted_key
     
     async def delete_user_api_key(self, user_id: int) -> bool:
         """
@@ -101,11 +148,43 @@ class PluginAPIService:
         Returns:
             删除成功返回True
         """
+        # 删除缓存
+        try:
+            cache_key = self._get_cache_key(user_id)
+            await self.redis.delete(cache_key)
+        except Exception as e:
+            logger.warning(f"删除缓存失败: {e}")
+        
         return await self.repo.delete(user_id)
     
     async def update_last_used(self, user_id: int):
-        """更新密钥最后使用时间"""
-        await self.repo.update_last_used(user_id)
+        """
+        更新密钥最后使用时间
+        
+        注意：此操作不需要立即更新，可以异步处理
+        为了减少数据库压力，这里不强制等待结果
+        """
+        try:
+            await self.repo.update_last_used(user_id)
+        except Exception as e:
+            # 更新最后使用时间失败不应该影响主流程
+            logger.warning(f"更新 plugin_api_key 最后使用时间失败: user_id={user_id}, error={e}")
+    
+    async def invalidate_cache(self, user_id: int):
+        """
+        使缓存失效
+        
+        当用户更新 API 密钥时调用
+        
+        Args:
+            user_id: 用户ID
+        """
+        try:
+            cache_key = self._get_cache_key(user_id)
+            await self.redis.delete(cache_key)
+            logger.debug(f"plugin_api_key 缓存已失效: user_id={user_id}")
+        except Exception as e:
+            logger.warning(f"使缓存失效失败: {e}")
     
     # ==================== Plug-in API代理方法 ====================
     
@@ -193,7 +272,8 @@ class PluginAPIService:
         method: str,
         path: str,
         json_data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None
+        params: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
         代理用户请求到plug-in-api
@@ -204,6 +284,7 @@ class PluginAPIService:
             path: API路径
             json_data: JSON请求体
             params: 查询参数
+            extra_headers: 额外的请求头
             
         Returns:
             API响应
@@ -219,6 +300,10 @@ class PluginAPIService:
         # 发送请求
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {api_key}"}
+        
+        # 添加额外的请求头
+        if extra_headers:
+            headers.update(extra_headers)
         
         async with httpx.AsyncClient() as client:
             response = await client.request(
@@ -237,7 +322,8 @@ class PluginAPIService:
         user_id: int,
         method: str,
         path: str,
-        json_data: Optional[Dict[str, Any]] = None
+        json_data: Optional[Dict[str, Any]] = None,
+        extra_headers: Optional[Dict[str, str]] = None
     ):
         """
         代理流式请求到plug-in-api
@@ -247,6 +333,7 @@ class PluginAPIService:
             method: HTTP方法
             path: API路径
             json_data: JSON请求体
+            extra_headers: 额外的请求头
             
         Yields:
             流式响应数据
@@ -256,12 +343,13 @@ class PluginAPIService:
         if not api_key:
             raise ValueError("用户未配置plug-in API密钥")
         
-        # 更新最后使用时间
-        await self.update_last_used(user_id)
-        
         # 发送流式请求
         url = f"{self.base_url}{path}"
         headers = {"Authorization": f"Bearer {api_key}"}
+        
+        # 添加额外的请求头
+        if extra_headers:
+            headers.update(extra_headers)
         
         async with httpx.AsyncClient() as client:
             async with client.stream(
@@ -269,11 +357,12 @@ class PluginAPIService:
                 url=url,
                 json=json_data,
                 headers=headers,
-                timeout=300.0
+                timeout=httpx.Timeout(300.0, connect=10.0)
             ) as response:
                 response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    yield chunk
+                async for chunk in response.aiter_raw():
+                    if chunk:
+                        yield chunk
     
     # ==================== 具体API方法 ====================
     
@@ -287,7 +376,9 @@ class PluginAPIService:
             user_id=user_id,
             method="POST",
             path="/api/oauth/authorize",
-            json_data={"is_shared": is_shared}
+            json_data={
+                "is_shared": is_shared
+            }
         )
     
     async def submit_oauth_callback(
@@ -345,6 +436,20 @@ class PluginAPIService:
             path=f"/api/accounts/{cookie_id}"
         )
     
+    async def update_account_name(
+        self,
+        user_id: int,
+        cookie_id: str,
+        name: str
+    ) -> Dict[str, Any]:
+        """更新账号名称"""
+        return await self.proxy_request(
+            user_id=user_id,
+            method="PUT",
+            path=f"/api/accounts/{cookie_id}/name",
+            json_data={"name": name}
+        )
+    
     async def get_account_quotas(
         self,
         user_id: int,
@@ -396,12 +501,18 @@ class PluginAPIService:
             params=params
         )
     
-    async def get_models(self, user_id: int) -> Dict[str, Any]:
+    async def get_models(self, user_id: int, config_type: Optional[str] = None) -> Dict[str, Any]:
         """获取可用模型列表"""
+        extra_headers = {}
+        if config_type:
+            extra_headers["X-Account-Type"] = config_type
+        print(f"Using config_type header: {config_type}")
+        
         return await self.proxy_request(
             user_id=user_id,
             method="GET",
-            path="/v1/models"
+            path="/v1/models",
+            extra_headers=extra_headers if extra_headers else None
         )
     
     async def update_cookie_preference(

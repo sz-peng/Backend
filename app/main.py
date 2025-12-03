@@ -14,7 +14,16 @@ from app.core.config import get_settings
 from app.core.exceptions import BaseAPIException
 from app.db.session import init_db, close_db
 from app.cache import init_redis, close_redis
-from app.api.routes import auth_router, health_router, plugin_api_router, api_keys_router, v1_router, usage_router
+from app.api.routes import (
+    auth_router,
+    health_router,
+    plugin_api_router,
+    api_keys_router,
+    v1_router,
+    usage_router,
+    kiro_router,
+    anthropic_router
+)
 
 # 配置日志
 logging.basicConfig(
@@ -31,35 +40,61 @@ async def lifespan(app: FastAPI):
     应用生命周期管理
     启动和关闭事件处理
     """
-    # 启动事件
+    logger = logging.getLogger(__name__)
     settings = get_settings()
     
     # 初始化数据库连接
     try:
+        logger.info("正在初始化数据库连接...")
         await init_db()
+        
+        # 测试数据库连接
+        from app.db.session import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        logger.info("✓ 数据库连接成功")
     except Exception as e:
+        logger.error(f"✗ 数据库连接失败: {str(e)}")
         raise
     
     # 初始化 Redis 连接
     try:
+        logger.info("正在初始化 Redis 连接...")
         await init_redis()
+        
+        # 测试 Redis 连接
+        from app.cache import get_redis_client
+        redis = get_redis_client()
+        await redis.ping()
+        logger.info("✓ Redis 连接成功")
     except Exception as e:
+        logger.error(f"✗ Redis 连接失败: {str(e)}")
         raise
+    
+    logger.info("🚀 应用启动完成")
     
     yield
     
     # 关闭事件
+    logger.info("正在关闭应用...")
+    
     # 关闭数据库连接
     try:
         await close_db()
+        logger.info("✓ 数据库连接已关闭")
     except Exception as e:
-        pass
+        logger.error(f"✗ 关闭数据库连接失败: {str(e)}")
     
     # 关闭 Redis 连接
     try:
         await close_redis()
+        logger.info("✓ Redis 连接已关闭")
     except Exception as e:
-        pass
+        logger.error(f"✗ 关闭 Redis 连接失败: {str(e)}")
+    
+    logger.info("👋 应用已关闭")
 
 
 # ==================== 创建 FastAPI 应用 ====================
@@ -106,7 +141,9 @@ def create_app() -> FastAPI:
     app.include_router(plugin_api_router, prefix="/api")
     app.include_router(api_keys_router, prefix="/api")
     app.include_router(usage_router, prefix="/api")
-    app.include_router(v1_router)  # OpenAI兼容API，直接在根路径
+    app.include_router(kiro_router)  # Kiro账号管理API (Beta)
+    app.include_router(v1_router)  # OpenAI兼容API，支持Antigravity和Kiro配置
+    app.include_router(anthropic_router)  # Anthropic兼容API (/v1/messages)
     
     # ==================== 异常处理器 ====================
     
@@ -121,6 +158,27 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
         """处理数据验证异常"""
+        # 检查是否是 Anthropic API 端点
+        if request.url.path.startswith("/v1/messages"):
+            # 返回 Anthropic 格式的错误响应
+            error_details = exc.errors()
+            error_messages = []
+            for error in error_details:
+                loc = " -> ".join(str(l) for l in error.get("loc", []))
+                msg = error.get("msg", "Unknown error")
+                error_messages.append(f"{loc}: {msg}")
+            
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": f"请求验证失败: {'; '.join(error_messages)}"
+                    }
+                }
+            )
+        
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={

@@ -73,6 +73,11 @@ class UpdateAccountStatusRequest(BaseModel):
     status: int = Field(..., description="0=禁用，1=启用")
 
 
+class UpdateAccountNameRequest(BaseModel):
+    """更新账号名称"""
+    name: str = Field(..., description="账号名称")
+
+
 class ChatCompletionRequest(BaseModel):
     """聊天补全请求（支持多模态）"""
     model: str = Field(..., description="模型名称")
