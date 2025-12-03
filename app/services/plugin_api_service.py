@@ -288,6 +288,9 @@ class PluginAPIService:
             
         Returns:
             API响应
+            
+        Raises:
+            httpx.HTTPStatusError: 当上游返回错误状态码时，包含上游的响应内容
         """
         # 获取用户的API密钥
         api_key = await self.get_user_api_key(user_id)
@@ -314,7 +317,25 @@ class PluginAPIService:
                 headers=headers,
                 timeout=300.0
             )
-            response.raise_for_status()
+            
+            # 如果响应不是成功状态码，抛出包含响应内容的异常
+            if response.status_code >= 400:
+                # 尝试解析JSON响应
+                try:
+                    error_data = response.json()
+                except Exception:
+                    error_data = {"detail": response.text}
+                
+                # 创建HTTPStatusError并附加响应数据
+                error = httpx.HTTPStatusError(
+                    message=f"上游API返回错误: {response.status_code}",
+                    request=response.request,
+                    response=response
+                )
+                # 将错误数据附加到异常对象
+                error.response_data = error_data
+                raise error
+            
             return response.json()
     
     async def proxy_stream_request(

@@ -5,6 +5,7 @@ Plug-in API相关的路由
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
+import httpx
 
 from app.api.deps import get_current_user, get_user_from_api_key, get_plugin_api_service
 from app.models.user import User
@@ -72,11 +73,6 @@ async def get_oauth_authorize_url(
 ):
     """获取OAuth授权URL"""
     try:
-        print(f"📤 [oauth/authorize] 用户传入内容:")
-        print(f"   user_id: {current_user.id}")
-        print(f"   username: {current_user.username}")
-        print(f"   request: {request.model_dump()}")
-        print(f"   is_shared: {request.is_shared}")
         
         result = await service.get_oauth_authorize_url(
             user_id=current_user.id,
@@ -112,6 +108,18 @@ async def submit_oauth_callback(
             callback_url=request.callback_url
         )
         return result
+    except httpx.HTTPStatusError as e:
+        # 透传上游API的错误响应
+        error_data = getattr(e, 'response_data', {"detail": str(e)})
+        # 如果error_data有detail字段，直接使用它；否则使用整个error_data
+        if isinstance(error_data, dict) and 'detail' in error_data:
+            detail = error_data['detail']
+        else:
+            detail = error_data
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=detail
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -120,7 +128,7 @@ async def submit_oauth_callback(
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"提交OAuth回调失败"
+            detail=f"登录失败：{str(e)}"
         )
 
 
