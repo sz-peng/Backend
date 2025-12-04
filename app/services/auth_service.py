@@ -4,6 +4,7 @@
 """
 from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
+import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from jwt.exceptions import ExpiredSignatureError, InvalidTokenError as JWTInvalidTokenError
@@ -32,6 +33,11 @@ from app.repositories.user_repository import UserRepository
 from app.cache.redis_client import RedisClient
 from app.models.user import User
 from app.schemas.token import TokenPayload
+
+logger = logging.getLogger(__name__)
+
+# JWT 用户缓存 TTL（秒）- 较短，因为 JWT 本身有过期时间
+JWT_USER_CACHE_TTL = 30
 
 
 class AuthService:
@@ -279,6 +285,8 @@ class AuthService:
         """
         根据令牌获取当前用户
         
+        优化：添加短期 Redis 缓存减少数据库查询
+        
         Args:
             token: JWT 令牌字符串
             
@@ -292,9 +300,25 @@ class AuthService:
         """
         # 验证令牌
         payload = await self.verify_token(token)
-        
-        # 获取用户
         user_id = int(payload.sub)
+        
+        # 尝试从缓存获取用户信息
+        cache_key = f"jwt_user:{user_id}"
+        try:
+            cached_data = await self.redis.get_json(cache_key)
+            if cached_data:
+                logger.debug(f"从缓存获取 JWT 用户信息: user_id={user_id}")
+                user = User(
+                    id=cached_data["id"],
+                    username=cached_data["username"],
+                    is_active=cached_data["is_active"],
+                    beta=cached_data.get("beta", 0)
+                )
+                return user
+        except Exception as e:
+            logger.warning(f"Redis 缓存读取失败: {e}")
+        
+        # 缓存未命中，从数据库获取
         user = await self.user_repo.get_by_id(user_id)
         
         if not user:
@@ -309,6 +333,19 @@ class AuthService:
                 message="账号已被禁用",
                 details={"user_id": user.id}
             )
+        
+        # 存入缓存（短期缓存，30秒）
+        try:
+            user_data = {
+                "id": user.id,
+                "username": user.username,
+                "is_active": user.is_active,
+                "beta": user.beta
+            }
+            await self.redis.set_json(cache_key, user_data, expire=JWT_USER_CACHE_TTL)
+            logger.debug(f"JWT 用户信息已缓存: user_id={user_id}, TTL={JWT_USER_CACHE_TTL}s")
+        except Exception as e:
+            logger.warning(f"Redis 缓存写入失败: {e}")
         
         return user
     

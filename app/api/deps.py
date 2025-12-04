@@ -3,7 +3,8 @@ API 依赖注入
 提供数据库会话、Redis 客户端、认证等依赖
 """
 from typing import AsyncGenerator, Optional
-from fastapi import Depends, HTTPException, status
+import logging
+from fastapi import Depends, HTTPException, status, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,7 @@ from app.services.user_service import UserService
 from app.services.plugin_api_service import PluginAPIService
 from app.models.user import User
 from app.repositories.api_key_repository import APIKeyRepository
+from app.repositories.user_repository import UserRepository
 from app.core.exceptions import (
     InvalidTokenError,
     TokenExpiredError,
@@ -23,6 +25,30 @@ from app.core.exceptions import (
     UserNotFoundError,
     AccountDisabledError,
 )
+
+logger = logging.getLogger(__name__)
+
+# API key 认证缓存 TTL（秒）
+API_KEY_AUTH_CACHE_TTL = 60
+
+
+async def update_api_key_last_used_background(api_key: str):
+    """
+    后台任务：更新 API key 最后使用时间
+    
+    注意：此函数在后台执行，失败不应影响主请求
+    """
+    try:
+        from app.db.session import get_session_maker
+        session_maker = get_session_maker()
+        async with session_maker() as db:
+            repo = APIKeyRepository(db)
+            await repo.update_last_used(api_key)
+            await db.commit()
+            logger.debug(f"后台更新 API key 使用时间成功: {api_key[:10]}...")
+    except Exception as e:
+        # 后台任务失败不应影响主流程，仅记录警告
+        logger.warning(f"后台更新 API key 使用时间失败: {e}")
 
 
 # HTTP Bearer 认证方案
@@ -201,15 +227,23 @@ async def get_optional_current_user(
 
 async def get_user_from_api_key(
     credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: AsyncSession = Depends(get_db_session)
+    db: AsyncSession = Depends(get_db_session),
+    redis: RedisClient = Depends(get_redis),
+    background_tasks: BackgroundTasks = BackgroundTasks()
 ) -> User:
     """
     通过API key获取用户
     用于OpenAI兼容的API端点
     
+    优化：
+    1. 使用 Redis 缓存认证结果
+    2. update_last_used 改为后台任务
+    
     Args:
         credentials: HTTP Authorization 凭证
         db: 数据库会话
+        redis: Redis 客户端
+        background_tasks: 后台任务
         
     Returns:
         User: 用户对象
@@ -221,7 +255,30 @@ async def get_user_from_api_key(
         # 提取API key
         api_key = credentials.credentials
         
-        # 查询API key
+        cache_key = f"api_key_auth:{api_key}"
+        
+        # 1. 尝试从 Redis 缓存获取
+        try:
+            cached_data = await redis.get_json(cache_key)
+            if cached_data:
+                logger.debug(f"从缓存获取 API key 认证结果: {api_key[:10]}...")
+                # 从缓存重建 User 对象
+                user = User(
+                    id=cached_data["id"],
+                    username=cached_data["username"],
+                    is_active=cached_data["is_active"],
+                    beta=cached_data.get("beta", 0)
+                )
+                user._config_type = cached_data.get("_config_type")
+                
+                # 后台更新 last_used（不阻塞）
+                background_tasks.add_task(update_api_key_last_used_background, api_key)
+                
+                return user
+        except Exception as e:
+            logger.warning(f"Redis 缓存读取失败: {e}")
+        
+        # 2. 缓存未命中，查询数据库
         repo = APIKeyRepository(db)
         key_record = await repo.get_by_key(api_key)
         
@@ -239,13 +296,9 @@ async def get_user_from_api_key(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
-        # 更新最后使用时间
-        await repo.update_last_used(api_key)
-        await db.commit()
-        
         # 获取用户
-        user_service = UserService(db)
-        user = await user_service.get_user_by_id(key_record.user_id)
+        user_repo = UserRepository(db)
+        user = await user_repo.get_by_id(key_record.user_id)
         
         if not user:
             raise HTTPException(
@@ -260,9 +313,24 @@ async def get_user_from_api_key(
             )
         
         # 将config_type附加到user对象上，供路由使用
-        print(f"🔍 [deps.py] API Key ID: {key_record.id}, User ID: {key_record.user_id}, Config Type from DB: {key_record.config_type}")
         user._config_type = key_record.config_type
-        print(f"🔍 [deps.py] Set user._config_type to: {user._config_type}")
+        
+        # 3. 存入缓存
+        try:
+            user_data = {
+                "id": user.id,
+                "username": user.username,
+                "is_active": user.is_active,
+                "beta": user.beta,
+                "_config_type": key_record.config_type
+            }
+            await redis.set_json(cache_key, user_data, expire=API_KEY_AUTH_CACHE_TTL)
+            logger.debug(f"API key 认证结果已缓存: {api_key[:10]}..., TTL={API_KEY_AUTH_CACHE_TTL}s")
+        except Exception as e:
+            logger.warning(f"Redis 缓存写入失败: {e}")
+        
+        # 4. 后台更新 last_used
+        background_tasks.add_task(update_api_key_last_used_background, api_key)
         
         return user
         

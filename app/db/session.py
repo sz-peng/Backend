@@ -44,10 +44,10 @@ def get_engine() -> AsyncEngine:
         
         # 优化后的连接池参数
         # 对于 3 核 / 22G 的服务器，PostgreSQL 默认 max_connections=100
-        # 单实例应用建议 pool_size + max_overflow 不超过 50
+        # 优化：增加连接池大小以应对高并发场景
         pool_config = {
-            "pool_size": 20,           # 基础连接池大小
-            "max_overflow": 20,        # 最大溢出连接数（总共最多40个连接）
+            "pool_size": 30,           # 基础连接池大小（从20增加到30）
+            "max_overflow": 30,        # 最大溢出连接数（从20增加到30，总共最多60个连接）
             "pool_timeout": 10,        # 获取连接超时时间（秒），缩短以快速发现问题
             "pool_recycle": 1800,      # 连接回收时间（30分钟），避免使用过期连接
             "pool_pre_ping": True,     # 连接前检查连接是否有效，防止使用"半死不活"的连接
