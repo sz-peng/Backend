@@ -214,8 +214,7 @@ async def create_message(
     description="计算消息的token数量（Anthropic兼容）"
 )
 async def count_tokens(
-    raw_request: Request,
-    current_user: User = Depends(get_user_flexible_with_x_api_key)
+    raw_request: Request
 ):
     """
     计算消息的token数量
