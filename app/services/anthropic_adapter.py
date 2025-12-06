@@ -354,9 +354,11 @@ class AnthropicAdapter:
         if isinstance(tool_choice, dict):
             choice_type = tool_choice.get("type", "auto")
             choice_name = tool_choice.get("name")
+            disable_parallel = tool_choice.get("disable_parallel_tool_use", False)
         else:
             choice_type = getattr(tool_choice, 'type', 'auto')
             choice_name = getattr(tool_choice, 'name', None)
+            disable_parallel = getattr(tool_choice, 'disable_parallel_tool_use', False)
         
         if choice_type == "auto":
             return "auto"
@@ -367,6 +369,8 @@ class AnthropicAdapter:
                 "type": "function",
                 "function": {"name": choice_name}
             }
+        elif choice_type == "none":
+            return "none"
         
         return "auto"
     
@@ -403,9 +407,16 @@ class AnthropicAdapter:
         for tool_call in tool_calls:
             if tool_call.get("type") == "function":
                 func = tool_call.get("function", {})
+                arguments_str = func.get("arguments", "{}")
+                
                 try:
-                    input_data = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
+                    input_data = json.loads(arguments_str)
+                except json.JSONDecodeError as e:
+                    # 记录解析失败的详细信息
+                    logger.error(f"工具调用参数JSON解析失败: {e}")
+                    logger.error(f"原始arguments字符串: {arguments_str}")
+                    logger.error(f"工具名称: {func.get('name', 'unknown')}")
+                    logger.error(f"工具调用ID: {tool_call.get('id', 'unknown')}")
                     input_data = {}
                 
                 content.append(AnthropicResponseToolUseContent(
@@ -426,7 +437,7 @@ class AnthropicAdapter:
         if tool_calls:
             stop_reason = "tool_use"
         
-        return AnthropicMessagesResponse(
+        anthropic_response = AnthropicMessagesResponse(
             id=f"msg_{openai_response.get('id', uuid.uuid4().hex[:24])}",
             model=model,
             content=content,
@@ -436,6 +447,8 @@ class AnthropicAdapter:
                 output_tokens=usage.get("completion_tokens", 0)
             )
         )
+    
+        return anthropic_response
     
     @classmethod
     async def convert_openai_stream_to_anthropic(
@@ -472,7 +485,7 @@ class AnthropicAdapter:
                 }
             }
         }
-        yield f"event: message_start\ndata: {json.dumps(message_start)}\n\n"
+        yield f"event: message_start\ndata: {json.dumps(message_start, ensure_ascii=False)}\n\n"
         
         # 发送content_block_start事件
         content_block_start = {
@@ -483,7 +496,7 @@ class AnthropicAdapter:
                 "text": ""
             }
         }
-        yield f"event: content_block_start\ndata: {json.dumps(content_block_start)}\n\n"
+        yield f"event: content_block_start\ndata: {json.dumps(content_block_start, ensure_ascii=False)}\n\n"
         
         # 跟踪状态
         accumulated_text = ""
@@ -499,10 +512,11 @@ class AnthropicAdapter:
         async for chunk in openai_stream:
             # 解码chunk
             if isinstance(chunk, bytes):
-                buffer += chunk.decode('utf-8')
+                chunk_str = chunk.decode('utf-8')
+                buffer += chunk_str
             else:
-                buffer += chunk
-            
+                chunk_str = chunk
+                buffer += chunk      
             # 处理SSE格式的数据
             while '\n' in buffer:
                 line, buffer = buffer.split('\n', 1)
@@ -519,7 +533,7 @@ class AnthropicAdapter:
                     
                     try:
                         data = json.loads(data_str)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
                         continue
                     
                     # 提取usage信息
@@ -552,22 +566,39 @@ class AnthropicAdapter:
                                 "text": text_delta
                             }
                         }
-                        yield f"event: content_block_delta\ndata: {json.dumps(content_delta)}\n\n"
+                        yield f"event: content_block_delta\ndata: {json.dumps(content_delta, ensure_ascii=False)}\n\n"
                     
                     # 处理工具调用
                     if 'tool_calls' in delta:
                         for tc in delta['tool_calls']:
-                            tc_index = tc.get('index', 0)
+                            tc_id = tc.get('id', '')
+                            
+                            # 首先尝试通过id查找已存在的工具调用
+                            tc_index = None
+                            if tc_id:
+                                for idx, existing_tc in current_tool_calls.items():
+                                    if existing_tc['id'] == tc_id:
+                                        tc_index = idx
+                                        break
+                            
+                            # 如果通过id没找到，检查是否是新的工具调用
+                            if tc_index is None:
+                                if tc_id and tc_id not in [t['id'] for t in current_tool_calls.values() if t['id']]:
+                                    # 这是一个新的工具调用，分配新的index
+                                    tc_index = len(current_tool_calls)
+                                else:
+                                    # 没有id，使用上游提供的index
+                                    tc_index = tc.get('index', 0)
                             
                             if tc_index not in current_tool_calls:
                                 # 新的工具调用
                                 current_tool_calls[tc_index] = {
-                                    'id': tc.get('id', ''),
+                                    'id': tc_id,
                                     'name': '',
                                     'arguments': ''
                                 }
                             
-                            if 'id' in tc:
+                            if 'id' in tc and tc['id']:
                                 current_tool_calls[tc_index]['id'] = tc['id']
                             
                             if 'function' in tc:
@@ -575,23 +606,31 @@ class AnthropicAdapter:
                                 if 'name' in func:
                                     current_tool_calls[tc_index]['name'] = func['name']
                                 if 'arguments' in func:
-                                    current_tool_calls[tc_index]['arguments'] += func['arguments']
+                                    args_chunk = func['arguments']
+                                    current_tool_calls[tc_index]['arguments'] += args_chunk
         
         # 发送content_block_stop事件（文本块）
         content_block_stop = {
             "type": "content_block_stop",
             "index": 0
         }
-        yield f"event: content_block_stop\ndata: {json.dumps(content_block_stop)}\n\n"
+        yield f"event: content_block_stop\ndata: {json.dumps(content_block_stop, ensure_ascii=False)}\n\n"
+        
         
         # 如果有工具调用，发送工具调用块
         for idx, tc in current_tool_calls.items():
             block_index = idx + 1
             
             # 解析参数
+            arguments_str = tc['arguments']
             try:
-                input_data = json.loads(tc['arguments']) if tc['arguments'] else {}
-            except json.JSONDecodeError:
+                input_data = json.loads(arguments_str) if arguments_str else {}
+            except json.JSONDecodeError as e:
+                # 记录解析失败的详细信息
+                logger.error(f"流式响应工具调用参数JSON解析失败: {e}")
+                logger.error(f"原始arguments字符串: {arguments_str}")
+                logger.error(f"工具名称: {tc['name']}")
+                logger.error(f"工具调用ID: {tc['id']}")
                 input_data = {}
             
             # content_block_start for tool_use
@@ -605,7 +644,7 @@ class AnthropicAdapter:
                     "input": {}
                 }
             }
-            yield f"event: content_block_start\ndata: {json.dumps(tool_block_start)}\n\n"
+            yield f"event: content_block_start\ndata: {json.dumps(tool_block_start, ensure_ascii=False)}\n\n"
             
             # content_block_delta for tool_use input
             if input_data:
@@ -614,17 +653,17 @@ class AnthropicAdapter:
                     "index": block_index,
                     "delta": {
                         "type": "input_json_delta",
-                        "partial_json": json.dumps(input_data)
+                        "partial_json": json.dumps(input_data, ensure_ascii=False)
                     }
                 }
-                yield f"event: content_block_delta\ndata: {json.dumps(tool_delta)}\n\n"
+                yield f"event: content_block_delta\ndata: {json.dumps(tool_delta, ensure_ascii=False)}\n\n"
             
             # content_block_stop for tool_use
             tool_block_stop = {
                 "type": "content_block_stop",
                 "index": block_index
             }
-            yield f"event: content_block_stop\ndata: {json.dumps(tool_block_stop)}\n\n"
+            yield f"event: content_block_stop\ndata: {json.dumps(tool_block_stop, ensure_ascii=False)}\n\n"
         
         # 确定停止原因
         if current_tool_calls:
@@ -645,13 +684,13 @@ class AnthropicAdapter:
                 "output_tokens": output_tokens
             }
         }
-        yield f"event: message_delta\ndata: {json.dumps(message_delta)}\n\n"
+        yield f"event: message_delta\ndata: {json.dumps(message_delta, ensure_ascii=False)}\n\n"
         
         # 发送message_stop事件
         message_stop = {
             "type": "message_stop"
         }
-        yield f"event: message_stop\ndata: {json.dumps(message_stop)}\n\n"
+        yield f"event: message_stop\ndata: {json.dumps(message_stop, ensure_ascii=False)}\n\n"
     
     @classmethod
     def create_error_response(

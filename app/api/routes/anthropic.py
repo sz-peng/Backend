@@ -6,7 +6,7 @@ Anthropic兼容的API端点
 from typing import Optional
 import uuid
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,7 +64,9 @@ async def create_message(
     raw_request: Request,
     current_user: User = Depends(get_user_flexible_with_x_api_key),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
-    kiro_service: KiroService = Depends(get_kiro_service)
+    kiro_service: KiroService = Depends(get_kiro_service),
+    anthropic_version: Optional[str] = Header(None, alias="anthropic-version"),
+    anthropic_beta: Optional[str] = Header(None, alias="anthropic-beta")
 ):
     """
     创建消息 (Anthropic Messages API兼容)
@@ -85,6 +87,9 @@ async def create_message(
     - 将响应转换回Anthropic格式返回
     """
     try:
+        if not anthropic_version:
+            anthropic_version = "2023-06-01"
+        
         # 生成请求ID
         request_id = uuid.uuid4().hex[:24]
         
@@ -151,14 +156,22 @@ async def create_message(
                     import json
                     yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
             
+            # 构建响应头
+            response_headers = {
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "anthropic-version": anthropic_version
+            }
+            
+            # 如果有beta头，也返回
+            if anthropic_beta:
+                response_headers["anthropic-beta"] = anthropic_beta
+            
             return StreamingResponse(
                 generate(),
                 media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no"
-                }
+                headers=response_headers
             )
         else:
             # 非流式请求
@@ -182,7 +195,19 @@ async def create_message(
                 model=request.model
             )
             
-            return anthropic_response
+            # 构建响应，添加必需的头
+            response = JSONResponse(
+                content=anthropic_response.model_dump(),
+                headers={
+                    "anthropic-version": anthropic_version
+                }
+            )
+            
+            # 如果有beta头，也返回
+            if anthropic_beta:
+                response.headers["anthropic-beta"] = anthropic_beta
+            
+            return response
             
     except HTTPException:
         raise

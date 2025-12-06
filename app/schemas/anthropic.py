@@ -78,8 +78,9 @@ class AnthropicTool(BaseModel):
 
 class AnthropicToolChoice(BaseModel):
     """Anthropic工具选择"""
-    type: Literal["auto", "any", "tool"] = "auto"
+    type: Literal["auto", "any", "tool", "none"] = "auto"
     name: Optional[str] = None  # 当type为"tool"时必填
+    disable_parallel_tool_use: Optional[bool] = False  # 是否禁用并行工具调用
 
 
 class AnthropicMetadata(BaseModel):
