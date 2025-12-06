@@ -45,14 +45,55 @@ class KiroAccountUpdate(BaseModel):
     status: Optional[int] = Field(None, description="账号状态：0=禁用，1=启用")
 
 
+class KiroBonusDetail(BaseModel):
+    """Kiro bonus详情"""
+    type: str = Field(..., description="类型，如 bonus")
+    name: str = Field(..., description="名称")
+    code: str = Field(..., description="兑换码")
+    description: Optional[str] = Field(None, description="描述")
+    usage: float = Field(..., description="已使用量")
+    limit: float = Field(..., description="总限额")
+    available: float = Field(..., description="可用余额")
+    status: str = Field(..., description="状态，如 ACTIVE")
+    expires_at: Optional[datetime] = Field(None, description="过期时间")
+    redeemed_at: Optional[datetime] = Field(None, description="兑换时间")
+
+
+class KiroBalanceInfo(BaseModel):
+    """Kiro余额信息"""
+    available: float = Field(..., description="总可用余额")
+    total_limit: float = Field(..., description="总限额")
+    current_usage: float = Field(..., description="当前使用量")
+    base_available: float = Field(..., description="基础可用余额")
+    bonus_available: float = Field(..., description="bonus可用余额")
+    reset_date: Optional[datetime] = Field(None, description="重置日期")
+
+
+class KiroFreeTrial(BaseModel):
+    """Kiro免费试用信息"""
+    status: bool = Field(..., description="免费试用状态")
+    usage: float = Field(..., description="已使用量")
+    limit: float = Field(..., description="总限额")
+    available: float = Field(..., description="可用余额")
+    expiry: Optional[datetime] = Field(None, description="过期时间")
+
+
+class KiroAccountBalanceData(BaseModel):
+    """Kiro账号余额数据"""
+    account_id: str = Field(..., description="账号ID")
+    account_name: str = Field(..., description="账号名称")
+    email: Optional[str] = Field(None, description="邮箱")
+    subscription: Optional[str] = Field(None, description="订阅类型，如 KIRO PRO+")
+    subscription_type: Optional[str] = Field(None, description="订阅类型详情，如 Q_DEVELOPER_STANDALONE_PRO_PLUS")
+    balance: KiroBalanceInfo = Field(..., description="余额详情")
+    free_trial: Optional[KiroFreeTrial] = Field(None, description="免费试用信息")
+    bonus_details: List[KiroBonusDetail] = Field(default_factory=list, description="bonus详情列表")
+
+
 class KiroAccountBalance(BaseModel):
-    """Kiro账号余额信息"""
-    account_id: int
-    account_name: str
-    email: Optional[str] = None
-    subscription: Optional[str] = None
-    balance: Dict[str, Any] = Field(..., description="余额详情")
-    raw_data: Dict[str, Any] = Field(..., description="原始数据")
+    """Kiro账号余额响应"""
+    success: bool = Field(..., description="是否成功")
+    data: KiroAccountBalanceData = Field(..., description="余额数据")
 
 
 # ==================== Kiro消费日志相关 ====================
