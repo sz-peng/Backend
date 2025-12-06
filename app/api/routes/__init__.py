@@ -9,6 +9,7 @@ from app.api.routes.v1 import router as v1_router
 from app.api.routes.usage import router as usage_router
 from app.api.routes.kiro import router as kiro_router
 from app.api.routes.anthropic import router as anthropic_router
+from app.api.routes.gemini import router as gemini_router
 
 __all__ = [
     "auth_router",
@@ -19,4 +20,5 @@ __all__ = [
     "usage_router",
     "kiro_router",
     "anthropic_router",
+    "gemini_router",
 ]

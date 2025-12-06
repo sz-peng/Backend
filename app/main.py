@@ -22,7 +22,8 @@ from app.api.routes import (
     v1_router,
     usage_router,
     kiro_router,
-    anthropic_router
+    anthropic_router,
+    gemini_router
 )
 
 # 配置日志
@@ -30,6 +31,9 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+# 创建模块级别的 logger
+logger = logging.getLogger(__name__)
 
 
 # ==================== 生命周期事件 ====================
@@ -144,6 +148,7 @@ def create_app() -> FastAPI:
     app.include_router(kiro_router)  # Kiro账号管理API (Beta)
     app.include_router(v1_router)  # OpenAI兼容API，支持Antigravity和Kiro配置
     app.include_router(anthropic_router)  # Anthropic兼容API (/v1/messages)
+    app.include_router(gemini_router)  # Gemini兼容API (/v1beta/models/{model}:generateContent)
     
     # ==================== 异常处理器 ====================
     

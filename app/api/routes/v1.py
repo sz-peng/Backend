@@ -5,7 +5,7 @@ OpenAI兼容的API端点
 用户通过我们的key/token调用，我们再用plug-in key调用plug-in-api
 """
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +34,7 @@ def get_kiro_service(
     description="获取可用的AI模型列表（OpenAI兼容）。根据API key的config_type自动选择Antigravity或Kiro配置"
 )
 async def list_models(
+    request: Request,
     current_user: User = Depends(get_user_flexible),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
     kiro_service: KiroService = Depends(get_kiro_service)
@@ -44,13 +45,20 @@ async def list_models(
     
     **配置选择:**
     - 使用API key认证时，根据API key创建时选择的config_type自动选择配置
-    - 使用JWT token认证时，默认使用Antigravity配置
+    - 使用JWT token认证时，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置
     - Kiro配置需要beta权限
     """
     try:
         # 判断使用哪个服务
         # 如果用户有config_type属性（来自API key），使用该配置
         config_type = getattr(current_user, '_config_type', None)
+        
+        # 如果是JWT token认证（无_config_type），检查请求头
+        if config_type is None:
+            api_type = request.headers.get("X-Api-Type")
+            if api_type in ["kiro", "antigravity"]:
+                config_type = api_type
+        
         use_kiro = config_type == "kiro"
         
         if use_kiro:
@@ -87,6 +95,7 @@ async def list_models(
 )
 async def chat_completions(
     request: ChatCompletionRequest,
+    raw_request: Request,
     current_user: User = Depends(get_user_flexible),
     antigravity_service: PluginAPIService = Depends(get_plugin_api_service),
     kiro_service: KiroService = Depends(get_kiro_service)
@@ -95,11 +104,11 @@ async def chat_completions(
     聊天补全
     支持两种认证方式：
     1. API key认证 - 用于程序调用，根据API key的config_type自动选择配置
-    2. JWT token认证 - 用于网页聊天，默认使用Antigravity配置
+    2. JWT token认证 - 用于网页聊天，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置
     
     **配置选择:**
     - 使用API key时，根据创建时选择的config_type（antigravity/kiro）自动路由
-    - 使用JWT token时，默认使用Antigravity配置
+    - 使用JWT token时，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置
     - Kiro配置需要beta权限
     
     我们使用用户对应的plug-in key调用plug-in-api
@@ -107,6 +116,13 @@ async def chat_completions(
     try:
         # 判断使用哪个服务
         config_type = getattr(current_user, '_config_type', None)
+        
+        # 如果是JWT token认证（无_config_type），检查请求头
+        if config_type is None:
+            api_type = raw_request.headers.get("X-Api-Type")
+            if api_type in ["kiro", "antigravity"]:
+                config_type = api_type
+        
         use_kiro = config_type == "kiro"
         
         if use_kiro:

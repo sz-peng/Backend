@@ -67,7 +67,7 @@ class KiroConsumptionLogResponse(BaseModel):
     consumed_at: datetime
     account_name: Optional[str] = None
     
-    model_config = {"from_attributes": True, "populate_by_name": True}
+    model_config = {"from_attributes": True, "populate_by_name": True, "protected_namespaces": ()}
 
 
 class KiroConsumptionStats(BaseModel):
@@ -78,6 +78,8 @@ class KiroConsumptionStats(BaseModel):
     avg_credit: str
     min_credit: str
     max_credit: str
+    
+    model_config = {"protected_namespaces": ()}
 
 
 class KiroConsumptionQuery(BaseModel):

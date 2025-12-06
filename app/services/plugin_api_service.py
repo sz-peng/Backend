@@ -315,7 +315,7 @@ class PluginAPIService:
                 json=json_data,
                 params=params,
                 headers=headers,
-                timeout=300.0
+                timeout=1200.0
             )
             
             # 如果响应不是成功状态码，抛出包含响应内容的异常
@@ -378,7 +378,7 @@ class PluginAPIService:
                 url=url,
                 json=json_data,
                 headers=headers,
-                timeout=httpx.Timeout(300.0, connect=10.0)
+                timeout=httpx.Timeout(1200.0, connect=60.0)
             ) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_raw():
@@ -580,3 +580,76 @@ class PluginAPIService:
             path=f"/api/accounts/{cookie_id}/quotas/{model_name}/status",
             json_data={"status": status}
         )
+    
+    # ==================== 图片生成API ====================
+    
+    async def generate_content(
+        self,
+        user_id: int,
+        model: str,
+        request_data: Dict[str, Any],
+        config_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        图片生成API（Gemini格式）
+        
+        Args:
+            user_id: 用户ID
+            model: 模型名称，例如 gemini-2.5-flash-image 或 gemini-2.5-pro-image
+            request_data: 请求数据，包含contents和generationConfig
+            config_type: 账号类型（可选）
+            
+        Returns:
+            生成结果，包含candidates数组，每个candidate包含content.parts[0].inlineData
+        """
+        # 构建请求路径
+        path = f"/v1beta/models/{model}:generateContent"
+        
+        # 准备额外的请求头
+        extra_headers = {}
+        if config_type:
+            extra_headers["X-Account-Type"] = config_type
+        
+        return await self.proxy_request(
+            user_id=user_id,
+            method="POST",
+            path=path,
+            json_data=request_data,
+            extra_headers=extra_headers if extra_headers else None
+        )
+    
+    async def generate_content_stream(
+        self,
+        user_id: int,
+        model: str,
+        request_data: Dict[str, Any],
+        config_type: Optional[str] = None
+    ):
+        """
+        图片生成API流式版本（Gemini格式）
+        
+        Args:
+            user_id: 用户ID
+            model: 模型名称
+            request_data: 请求数据
+            config_type: 账号类型（可选）
+            
+        Yields:
+            流式响应数据
+        """
+        # 构建请求路径（流式使用streamGenerateContent）
+        path = f"/v1beta/models/{model}:streamGenerateContent"
+        
+        # 准备额外的请求头
+        extra_headers = {}
+        if config_type:
+            extra_headers["X-Account-Type"] = config_type
+        
+        async for chunk in self.proxy_stream_request(
+            user_id=user_id,
+            method="POST",
+            path=path,
+            json_data=request_data,
+            extra_headers=extra_headers if extra_headers else None
+        ):
+            yield chunk

@@ -74,11 +74,11 @@ async def create_message(
     支持三种认证方式：
     1. X-Api-Key 标头 - Anthropic 官方认证方式
     2. Authorization Bearer API key - 用于程序调用，根据API key的config_type自动选择配置
-    3. Authorization Bearer JWT token - 用于网页聊天，默认使用Antigravity配置
+    3. Authorization Bearer JWT token - 用于网页聊天，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置
     
     **配置选择:**
     - 使用API key时，根据创建时选择的config_type（antigravity/kiro）自动路由
-    - 使用JWT token时，默认使用Antigravity配置
+    - 使用JWT token时，默认使用Antigravity配置，但可以通过X-Api-Type请求头指定配置
     - Kiro配置需要beta权限
     
     **格式转换:**
@@ -95,6 +95,13 @@ async def create_message(
         
         # 判断使用哪个服务
         config_type = getattr(current_user, '_config_type', None)
+        
+        # 如果是JWT token认证（无_config_type），检查请求头
+        if config_type is None:
+            api_type = raw_request.headers.get("X-Api-Type")
+            if api_type in ["kiro", "antigravity"]:
+                config_type = api_type
+        
         use_kiro = config_type == "kiro"
         
         if use_kiro:

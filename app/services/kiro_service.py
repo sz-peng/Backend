@@ -131,7 +131,7 @@ class KiroService:
                 url=url,
                 json=json_data,
                 params=params,
-                headers=headers,timeout=300.0
+                headers=headers,timeout=1200.0
             )
             response.raise_for_status()
             return response.json()
@@ -165,7 +165,7 @@ class KiroService:
                 url=url,
                 json=json_data,
                 headers=headers,
-                timeout=httpx.Timeout(300.0, connect=10.0)
+                timeout=httpx.Timeout(1200.0, connect=60.0)
             ) as response:
                 response.raise_for_status()
                 async for chunk in response.aiter_raw():

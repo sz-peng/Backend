@@ -97,6 +97,86 @@ class QuotaConsumptionQuery(BaseModel):
     end_date: Optional[str] = Field(None, description="结束日期")
 
 
+# ==================== 图片生成相关 ====================
+
+class ImageConfigRequest(BaseModel):
+    """图片生成配置"""
+    aspectRatio: Optional[str] = Field(
+        None,
+        description="宽高比。支持的值：1:1、2:3、3:2、3:4、4:3、9:16、16:9、21:9。如果未指定，模型将根据提供的任何参考图片选择默认宽高比。"
+    )
+    imageSize: Optional[str] = Field(
+        None,
+        description="图片尺寸。支持的值为 1K、2K、4K。如果未指定，模型将使用默认值 1K。"
+    )
+
+
+class GenerationConfigRequest(BaseModel):
+    """生成配置"""
+    imageConfig: Optional[ImageConfigRequest] = Field(None, description="图片生成配置")
+    
+    model_config = {"extra": "allow"}  # 允许额外字段
+
+
+class ContentPartText(BaseModel):
+    """文本内容部分"""
+    text: str = Field(..., description="文本内容")
+
+
+class ContentPartInlineData(BaseModel):
+    """内联数据内容部分（用于图片等）"""
+    mimeType: str = Field(..., description="MIME类型，例如 image/jpeg")
+    data: str = Field(..., description="Base64编码的数据")
+
+
+class InlineDataWrapper(BaseModel):
+    """内联数据包装器"""
+    inlineData: ContentPartInlineData
+
+
+class ContentMessage(BaseModel):
+    """内容消息"""
+    role: str = Field(..., description="角色，例如 user, model")
+    parts: List[Dict[str, Any]] = Field(..., description="内容部分列表，可包含text或inlineData")
+
+
+class GenerateContentRequest(BaseModel):
+    """图片生成请求（Gemini格式）"""
+    contents: List[ContentMessage] = Field(..., description="包含提示词的消息数组")
+    generationConfig: Optional[GenerationConfigRequest] = Field(None, description="生成配置")
+    
+    model_config = {"extra": "allow"}  # 允许额外字段，支持其他Gemini参数
+
+
+class InlineDataResponse(BaseModel):
+    """内联数据响应"""
+    mimeType: str = Field(..., description="MIME类型，例如 image/jpeg")
+    data: str = Field(..., description="Base64编码的图片数据")
+
+
+class ContentPartResponse(BaseModel):
+    """内容部分响应"""
+    inlineData: Optional[InlineDataResponse] = None
+    text: Optional[str] = None
+
+
+class ContentResponse(BaseModel):
+    """内容响应"""
+    parts: List[ContentPartResponse] = Field(..., description="内容部分列表")
+    role: str = Field("model", description="角色")
+
+
+class CandidateResponse(BaseModel):
+    """候选响应"""
+    content: ContentResponse
+    finishReason: str = Field("STOP", description="完成原因")
+
+
+class GenerateContentResponse(BaseModel):
+    """图片生成响应"""
+    candidates: List[CandidateResponse] = Field(..., description="候选结果列表")
+
+
 # ==================== 通用响应 ====================
 
 class PluginAPIResponse(BaseModel):
