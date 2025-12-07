@@ -21,6 +21,7 @@ from app.schemas.plugin_api import (
     UpdateCookiePreferenceRequest,
     UpdateAccountStatusRequest,
     UpdateAccountNameRequest,
+    UpdateAccountTypeRequest,
     ChatCompletionRequest,
     PluginAPIResponse,
     GenerateContentRequest,
@@ -275,6 +276,58 @@ async def update_account_name(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"更新账号名称失败"
+        )
+
+
+@router.put(
+    "/accounts/{cookie_id}/type",
+    summary="转换账号类型",
+    description="将账号在专属和共享之间转换，同时自动更新用户共享配额池"
+)
+async def update_account_type(
+    cookie_id: str,
+    request: UpdateAccountTypeRequest,
+    current_user: User = Depends(get_current_user),
+    service: PluginAPIService = Depends(get_plugin_api_service)
+):
+    """
+    转换账号类型
+    
+    - **专属账号 → 共享账号** (is_shared: 0 → 1)：自动增加用户共享配额池
+      - 每个模型的配额增加 = 账号配额 × 2
+      - max_quota 增加 2
+      
+    - **共享账号 → 专属账号** (is_shared: 1 → 0)：自动减少用户共享配额池
+      - 每个模型的配额减少 = 账号配额 × 2
+      - max_quota 减少 2
+    """
+    try:
+        result = await service.update_account_type(
+            user_id=current_user.id,
+            cookie_id=cookie_id,
+            is_shared=request.is_shared
+        )
+        return result
+    except httpx.HTTPStatusError as e:
+        # 透传上游API的错误响应
+        error_data = getattr(e, 'response_data', {"detail": str(e)})
+        if isinstance(error_data, dict) and 'detail' in error_data:
+            detail = error_data['detail']
+        else:
+            detail = error_data
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=detail
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"更新账号类型失败"
         )
 
 

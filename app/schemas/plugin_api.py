@@ -73,6 +73,11 @@ class UpdateAccountStatusRequest(BaseModel):
     status: int = Field(..., description="0=禁用，1=启用")
 
 
+class UpdateAccountTypeRequest(BaseModel):
+    """更新账号类型（专属/共享）"""
+    is_shared: int = Field(..., description="账号类型：0=专属，1=共享")
+
+
 class UpdateAccountNameRequest(BaseModel):
     """更新账号名称"""
     name: str = Field(..., description="账号名称")

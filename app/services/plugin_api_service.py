@@ -581,6 +581,32 @@ class PluginAPIService:
             json_data={"status": status}
         )
     
+    async def update_account_type(
+        self,
+        user_id: int,
+        cookie_id: str,
+        is_shared: int
+    ) -> Dict[str, Any]:
+        """
+        更新账号类型（专属/共享）
+        
+        将账号在专属和共享之间转换，同时自动更新用户共享配额池。
+        
+        Args:
+            user_id: 用户ID
+            cookie_id: 账号的Cookie ID
+            is_shared: 账号类型：0=专属，1=共享
+            
+        Returns:
+            更新结果
+        """
+        return await self.proxy_request(
+            user_id=user_id,
+            method="PUT",
+            path=f"/api/accounts/{cookie_id}/type",
+            json_data={"is_shared": is_shared}
+        )
+    
     # ==================== 图片生成API ====================
     
     async def generate_content(

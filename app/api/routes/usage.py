@@ -35,11 +35,20 @@ async def get_quotas(
         # 获取共享池配额
         shared_pool_quota = await service.get_shared_pool_quotas(current_user.id)
         
+        # 处理新的响应格式：data 可能是对象（包含 quotas 和 user_consumption）或数组
+        shared_pool_data = shared_pool_quota.get("data", {})
+        if isinstance(shared_pool_data, dict):
+            # 新格式：返回完整的对象
+            shared_pool_result = shared_pool_data
+        else:
+            # 旧格式：数组，包装成对象
+            shared_pool_result = {"quotas": shared_pool_data}
+        
         return {
             "success": True,
             "data": {
                 "user_quota": user_quota.get("data", []),
-                "shared_pool_quota": shared_pool_quota.get("data", [])
+                "shared_pool_quota": shared_pool_result
             }
         }
     except ValueError as e:
@@ -168,7 +177,12 @@ async def get_usage_summary(
         
         # 获取共享池配额
         shared_pool_result = await service.get_shared_pool_quotas(current_user.id)
-        shared_pool_quotas = shared_pool_result.get("data", [])
+        shared_pool_data = shared_pool_result.get("data", {})
+        # 处理新的响应格式：data 可能是对象（包含 quotas）或数组
+        if isinstance(shared_pool_data, dict):
+            shared_pool_quotas = shared_pool_data.get("quotas", [])
+        else:
+            shared_pool_quotas = shared_pool_data
         
         # 统计信息
         total_accounts = len(accounts)
@@ -236,7 +250,15 @@ async def get_shared_pool_stats(
         
         # 获取共享池配额
         shared_pool_result = await service.get_shared_pool_quotas(current_user.id)
-        shared_pool_quotas = shared_pool_result.get("data", [])
+        shared_pool_data = shared_pool_result.get("data", {})
+        
+        # 处理新的响应格式：data 可能是对象（包含 quotas 和 user_consumption）或数组
+        if isinstance(shared_pool_data, dict):
+            shared_pool_quotas = shared_pool_data.get("quotas", [])
+            user_consumption = shared_pool_data.get("user_consumption", {})
+        else:
+            shared_pool_quotas = shared_pool_data
+            user_consumption = {}
         
         # 按模型统计配额
         quota_stats = {}
@@ -258,6 +280,7 @@ async def get_shared_pool_stats(
                     "inactive_shared": len(shared_accounts) - len(active_shared_accounts)
                 },
                 "quotas_by_model": quota_stats,
+                "user_consumption": user_consumption,
                 "note": "24小时消耗统计需要启用使用日志记录功能"
             }
         }
