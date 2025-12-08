@@ -376,6 +376,9 @@ class PluginAPIService:
             
         Yields:
             流式响应数据
+            
+        Note:
+            当上游返回错误状态码时，会生成一个SSE格式的错误消息
         """
         # 获取用户的API密钥
         api_key = await self.get_user_api_key(user_id)
@@ -398,7 +401,55 @@ class PluginAPIService:
                 headers=headers,
                 timeout=httpx.Timeout(1200.0, connect=60.0)
             ) as response:
-                response.raise_for_status()
+                # 检查响应状态码，如果是错误状态码，读取错误内容并生成SSE格式的错误消息
+                if response.status_code >= 400:
+                    # 读取错误响应内容
+                    error_content = await response.aread()
+                    try:
+                        import json
+                        error_data = json.loads(error_content.decode('utf-8'))
+                    except Exception:
+                        error_data = {"detail": error_content.decode('utf-8', errors='replace')}
+                    
+                    # 记录错误日志
+                    logger.error(f"上游API返回错误: status={response.status_code}, url={url}, error={error_data}")
+                    
+                    # 提取错误消息，处理多种格式
+                    error_message = None
+                    if isinstance(error_data, dict):
+                        # 尝试获取 detail 字段
+                        if "detail" in error_data:
+                            error_message = error_data["detail"]
+                        # 尝试获取 error 字段（可能是字符串或字典）
+                        elif "error" in error_data:
+                            error_field = error_data["error"]
+                            if isinstance(error_field, str):
+                                error_message = error_field
+                            elif isinstance(error_field, dict):
+                                error_message = error_field.get("message") or str(error_field)
+                            else:
+                                error_message = str(error_field)
+                        # 尝试获取 message 字段
+                        elif "message" in error_data:
+                            error_message = error_data["message"]
+                    
+                    # 如果还是没有提取到消息，使用整个 error_data 的字符串表示
+                    if not error_message:
+                        error_message = str(error_data)
+                    
+                    # 生成SSE格式的错误消息
+                    import json
+                    error_response = {
+                        "error": {
+                            "message": error_message,
+                            "type": "upstream_error",
+                            "code": response.status_code
+                        }
+                    }
+                    yield f"data: {json.dumps(error_response)}\n\n".encode('utf-8')
+                    yield b"data: [DONE]\n\n"
+                    return
+                
                 async for chunk in response.aiter_raw():
                     if chunk:
                         yield chunk

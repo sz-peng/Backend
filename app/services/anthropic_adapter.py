@@ -467,6 +467,9 @@ class AnthropicAdapter:
             
         Yields:
             Anthropic格式的SSE事件
+            
+        Note:
+            支持将OpenAI格式的reasoning_content转换为<think></think>标签格式
         """
         # 发送message_start事件
         message_start = {
@@ -507,6 +510,11 @@ class AnthropicAdapter:
         tool_call_index = 0
         has_sent_tool_block = False
         
+        # reasoning content 状态跟踪
+        is_in_reasoning = False  # 是否正在处理reasoning内容
+        has_sent_think_open = False  # 是否已发送<think>开始标签
+        has_sent_think_close = False  # 是否已发送</think>结束标签
+        
         buffer = ""
         
         async for chunk in openai_stream:
@@ -516,7 +524,7 @@ class AnthropicAdapter:
                 buffer += chunk_str
             else:
                 chunk_str = chunk
-                buffer += chunk      
+                buffer += chunk
             # 处理SSE格式的数据
             while '\n' in buffer:
                 line, buffer = buffer.split('\n', 1)
@@ -552,9 +560,53 @@ class AnthropicAdapter:
                     if choice.get('finish_reason'):
                         finish_reason = choice['finish_reason']
                     
+                    # 处理reasoning_content（思考过程）
+                    # 支持多种格式：reasoning_content, reasoning, thinking_content
+                    reasoning_delta = delta.get('reasoning_content') or delta.get('reasoning') or delta.get('thinking_content')
+                    if reasoning_delta:
+                        # 如果还没发送<think>开始标签，先发送
+                        if not has_sent_think_open:
+                            has_sent_think_open = True
+                            is_in_reasoning = True
+                            think_open_delta = {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "text_delta",
+                                    "text": "<think>"
+                                }
+                            }
+                            yield f"event: content_block_delta\ndata: {json.dumps(think_open_delta, ensure_ascii=False)}\n\n"
+                        
+                        # 发送reasoning内容
+                        reasoning_content_delta = {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "text_delta",
+                                "text": reasoning_delta
+                            }
+                        }
+                        yield f"event: content_block_delta\ndata: {json.dumps(reasoning_content_delta, ensure_ascii=False)}\n\n"
+                    
                     # 处理文本内容
                     if 'content' in delta and delta['content']:
                         text_delta = delta['content']
+                        
+                        # 如果之前在reasoning模式，现在收到了普通content，需要先关闭<think>标签
+                        if is_in_reasoning and not has_sent_think_close:
+                            has_sent_think_close = True
+                            is_in_reasoning = False
+                            think_close_delta = {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "text_delta",
+                                    "text": "</think>\n\n"
+                                }
+                            }
+                            yield f"event: content_block_delta\ndata: {json.dumps(think_close_delta, ensure_ascii=False)}\n\n"
+                        
                         accumulated_text += text_delta
                         
                         # 发送content_block_delta事件
@@ -570,6 +622,20 @@ class AnthropicAdapter:
                     
                     # 处理工具调用
                     if 'tool_calls' in delta:
+                        # 如果之前在reasoning模式，现在收到了工具调用，需要先关闭<think>标签
+                        if is_in_reasoning and not has_sent_think_close:
+                            has_sent_think_close = True
+                            is_in_reasoning = False
+                            think_close_delta = {
+                                "type": "content_block_delta",
+                                "index": 0,
+                                "delta": {
+                                    "type": "text_delta",
+                                    "text": "</think>\n\n"
+                                }
+                            }
+                            yield f"event: content_block_delta\ndata: {json.dumps(think_close_delta, ensure_ascii=False)}\n\n"
+                        
                         for tc in delta['tool_calls']:
                             tc_id = tc.get('id', '')
                             
@@ -608,6 +674,19 @@ class AnthropicAdapter:
                                 if 'arguments' in func:
                                     args_chunk = func['arguments']
                                     current_tool_calls[tc_index]['arguments'] += args_chunk
+        
+        # 如果还在reasoning模式但流结束了，需要关闭<think>标签
+        if is_in_reasoning and not has_sent_think_close:
+            has_sent_think_close = True
+            think_close_delta = {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "</think>\n\n"
+                }
+            }
+            yield f"event: content_block_delta\ndata: {json.dumps(think_close_delta, ensure_ascii=False)}\n\n"
         
         # 发送content_block_stop事件（文本块）
         content_block_stop = {
