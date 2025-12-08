@@ -47,12 +47,27 @@ class AnthropicToolResultContent(BaseModel):
     is_error: Optional[bool] = False
 
 
+class AnthropicThinkingContent(BaseModel):
+    """Anthropic思考内容块（Extended Thinking）- 用于请求消息"""
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: Optional[str] = None  # 思考内容的签名（可选）
+
+
+class AnthropicRedactedThinkingContent(BaseModel):
+    """Anthropic已编辑思考内容块（Extended Thinking）- 用于请求消息"""
+    type: Literal["redacted_thinking"] = "redacted_thinking"
+    data: str  # 已编辑的思考内容数据
+
+
 # 内容块联合类型
 AnthropicContentBlock = Union[
     AnthropicTextContent,
     AnthropicImageContent,
     AnthropicToolUseContent,
-    AnthropicToolResultContent
+    AnthropicToolResultContent,
+    AnthropicThinkingContent,
+    AnthropicRedactedThinkingContent
 ]
 
 
