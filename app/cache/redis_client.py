@@ -31,7 +31,9 @@ class RedisClient:
                 self._settings.redis_url,
                 encoding="utf-8",
                 decode_responses=True,
-                max_connections=10,
+                max_connections=50,  # 增加最大连接数，避免高并发下连接池耗尽
+                socket_timeout=5.0,  # 设置超时时间
+                health_check_interval=30, # 定期健康检查
             )
     
     async def disconnect(self) -> None:

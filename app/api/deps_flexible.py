@@ -14,7 +14,7 @@ from app.services.auth_service import AuthService
 from app.repositories.api_key_repository import APIKeyRepository
 from app.repositories.user_repository import UserRepository
 from app.api.deps import get_auth_service, get_redis
-from app.cache import RedisClient
+from app.cache import RedisClient, get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +26,21 @@ async def update_api_key_last_used_background(api_key: str):
     """
     后台任务：更新 API key 最后使用时间
     
-    注意：此函数在后台执行，失败不应影响主请求
+    优化：使用 Redis 限流，避免频繁写入数据库
     """
     try:
+        # 1. 检查 Redis 限流
+        redis = get_redis_client()
+        throttle_key = f"last_used_throttle:{api_key}"
+        
+        # 如果限流键存在，说明最近已更新过，跳过
+        if await redis.exists(throttle_key):
+            return
+            
+        # 2. 设置限流键 (60秒)
+        await redis.set(throttle_key, "1", expire=60)
+        
+        # 3. 更新数据库
         from app.db.session import get_session_maker
         session_maker = get_session_maker()
         async with session_maker() as db:
@@ -36,6 +48,7 @@ async def update_api_key_last_used_background(api_key: str):
             await repo.update_last_used(api_key)
             await db.commit()
             logger.debug(f"后台更新 API key 使用时间成功: {api_key[:10]}...")
+            
     except Exception as e:
         # 后台任务失败不应影响主流程，仅记录警告
         logger.warning(f"后台更新 API key 使用时间失败: {e}")

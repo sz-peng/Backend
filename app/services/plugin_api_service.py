@@ -161,11 +161,29 @@ class PluginAPIService:
         """
         更新密钥最后使用时间
         
-        注意：此操作不需要立即更新，可以异步处理
-        为了减少数据库压力，这里不强制等待结果
+        优化：
+        1. 使用 Redis 限流，避免频繁写入数据库
+        2. 使用独立的数据库会话，避免长时间占用主会话
         """
         try:
-            await self.repo.update_last_used(user_id)
+            # 1. 检查 Redis 限流 (60秒)
+            throttle_key = f"plugin_key_last_used_throttle:{user_id}"
+            if await self.redis.exists(throttle_key):
+                return
+            
+            # 2. 设置限流键
+            await self.redis.set(throttle_key, "1", expire=60)
+            
+            # 3. 使用独立会话更新数据库
+            from app.db.session import get_session_maker
+            from app.repositories.plugin_api_key_repository import PluginAPIKeyRepository
+            
+            session_maker = get_session_maker()
+            async with session_maker() as db:
+                repo = PluginAPIKeyRepository(db)
+                await repo.update_last_used(user_id)
+                await db.commit()
+                
         except Exception as e:
             # 更新最后使用时间失败不应该影响主流程
             logger.warning(f"更新 plugin_api_key 最后使用时间失败: user_id={user_id}, error={e}")
