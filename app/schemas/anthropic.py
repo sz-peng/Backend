@@ -88,7 +88,10 @@ class AnthropicTool(BaseModel):
     """Anthropic工具定义"""
     name: str
     description: Optional[str] = None
-    input_schema: AnthropicToolInputSchema
+    input_schema: Optional[AnthropicToolInputSchema] = Field(
+        default_factory=lambda: AnthropicToolInputSchema(),
+        description="工具输入模式，可选。如果未提供，默认为空对象模式"
+    )
 
 
 class AnthropicToolChoice(BaseModel):
