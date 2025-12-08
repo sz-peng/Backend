@@ -13,6 +13,7 @@ from app.schemas.anthropic import (
     AnthropicMessagesResponse,
     AnthropicUsage,
     AnthropicResponseTextContent,
+    AnthropicResponseThinkingContent,
     AnthropicResponseToolUseContent,
     AnthropicErrorResponse,
     AnthropicErrorDetail,
@@ -469,7 +470,7 @@ class AnthropicAdapter:
             Anthropic格式的SSE事件
             
         Note:
-            支持将OpenAI格式的reasoning_content转换为<think></think>标签格式
+            支持将OpenAI格式的reasoning_content转换为Anthropic的thinking content block格式
         """
         # 发送message_start事件
         message_start = {
@@ -490,30 +491,24 @@ class AnthropicAdapter:
         }
         yield f"event: message_start\ndata: {json.dumps(message_start, ensure_ascii=False)}\n\n"
         
-        # 发送content_block_start事件
-        content_block_start = {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {
-                "type": "text",
-                "text": ""
-            }
-        }
-        yield f"event: content_block_start\ndata: {json.dumps(content_block_start, ensure_ascii=False)}\n\n"
-        
         # 跟踪状态
         accumulated_text = ""
+        accumulated_thinking = ""
         input_tokens = 0
         output_tokens = 0
         finish_reason = None
         current_tool_calls = {}  # 跟踪工具调用
-        tool_call_index = 0
-        has_sent_tool_block = False
         
-        # reasoning content 状态跟踪
-        is_in_reasoning = False  # 是否正在处理reasoning内容
-        has_sent_think_open = False  # 是否已发送<think>开始标签
-        has_sent_think_close = False  # 是否已发送</think>结束标签
+        # content block 索引跟踪
+        current_block_index = 0
+        
+        # thinking content 状态跟踪
+        has_thinking_content = False  # 是否有thinking内容
+        thinking_block_started = False  # thinking块是否已开始
+        thinking_block_stopped = False  # thinking块是否已结束
+        
+        # text content 状态跟踪
+        text_block_started = False  # text块是否已开始
         
         buffer = ""
         
@@ -564,55 +559,68 @@ class AnthropicAdapter:
                     # 支持多种格式：reasoning_content, reasoning, thinking_content
                     reasoning_delta = delta.get('reasoning_content') or delta.get('reasoning') or delta.get('thinking_content')
                     if reasoning_delta:
-                        # 如果还没发送<think>开始标签，先发送
-                        if not has_sent_think_open:
-                            has_sent_think_open = True
-                            is_in_reasoning = True
-                            think_open_delta = {
-                                "type": "content_block_delta",
-                                "index": 0,
-                                "delta": {
-                                    "type": "text_delta",
-                                    "text": "<think>"
+                        has_thinking_content = True
+                        accumulated_thinking += reasoning_delta
+                        
+                        # 如果thinking块还没开始，先发送content_block_start
+                        if not thinking_block_started:
+                            thinking_block_started = True
+                            thinking_block_start = {
+                                "type": "content_block_start",
+                                "index": current_block_index,
+                                "content_block": {
+                                    "type": "thinking",
+                                    "thinking": ""
                                 }
                             }
-                            yield f"event: content_block_delta\ndata: {json.dumps(think_open_delta, ensure_ascii=False)}\n\n"
+                            yield f"event: content_block_start\ndata: {json.dumps(thinking_block_start, ensure_ascii=False)}\n\n"
                         
-                        # 发送reasoning内容
-                        reasoning_content_delta = {
+                        # 发送thinking内容增量
+                        thinking_delta_event = {
                             "type": "content_block_delta",
-                            "index": 0,
+                            "index": current_block_index,
                             "delta": {
-                                "type": "text_delta",
-                                "text": reasoning_delta
+                                "type": "thinking_delta",
+                                "thinking": reasoning_delta
                             }
                         }
-                        yield f"event: content_block_delta\ndata: {json.dumps(reasoning_content_delta, ensure_ascii=False)}\n\n"
+                        yield f"event: content_block_delta\ndata: {json.dumps(thinking_delta_event, ensure_ascii=False)}\n\n"
                     
                     # 处理文本内容
                     if 'content' in delta and delta['content']:
                         text_delta = delta['content']
                         
-                        # 如果之前在reasoning模式，现在收到了普通content，需要先关闭<think>标签
-                        if is_in_reasoning and not has_sent_think_close:
-                            has_sent_think_close = True
-                            is_in_reasoning = False
-                            think_close_delta = {
-                                "type": "content_block_delta",
-                                "index": 0,
-                                "delta": {
-                                    "type": "text_delta",
-                                    "text": "</think>\n\n"
+                        # 如果之前有thinking内容且thinking块还没结束，先结束thinking块
+                        if thinking_block_started and not thinking_block_stopped:
+                            thinking_block_stopped = True
+                            # 发送thinking块的content_block_stop
+                            thinking_block_stop = {
+                                "type": "content_block_stop",
+                                "index": current_block_index
+                            }
+                            yield f"event: content_block_stop\ndata: {json.dumps(thinking_block_stop, ensure_ascii=False)}\n\n"
+                            # 增加block索引
+                            current_block_index += 1
+                        
+                        # 如果text块还没开始，先发送content_block_start
+                        if not text_block_started:
+                            text_block_started = True
+                            text_block_start = {
+                                "type": "content_block_start",
+                                "index": current_block_index,
+                                "content_block": {
+                                    "type": "text",
+                                    "text": ""
                                 }
                             }
-                            yield f"event: content_block_delta\ndata: {json.dumps(think_close_delta, ensure_ascii=False)}\n\n"
+                            yield f"event: content_block_start\ndata: {json.dumps(text_block_start, ensure_ascii=False)}\n\n"
                         
                         accumulated_text += text_delta
                         
                         # 发送content_block_delta事件
                         content_delta = {
                             "type": "content_block_delta",
-                            "index": 0,
+                            "index": current_block_index,
                             "delta": {
                                 "type": "text_delta",
                                 "text": text_delta
@@ -622,19 +630,15 @@ class AnthropicAdapter:
                     
                     # 处理工具调用
                     if 'tool_calls' in delta:
-                        # 如果之前在reasoning模式，现在收到了工具调用，需要先关闭<think>标签
-                        if is_in_reasoning and not has_sent_think_close:
-                            has_sent_think_close = True
-                            is_in_reasoning = False
-                            think_close_delta = {
-                                "type": "content_block_delta",
-                                "index": 0,
-                                "delta": {
-                                    "type": "text_delta",
-                                    "text": "</think>\n\n"
-                                }
+                        # 如果之前有thinking内容且thinking块还没结束，先结束thinking块
+                        if thinking_block_started and not thinking_block_stopped:
+                            thinking_block_stopped = True
+                            thinking_block_stop = {
+                                "type": "content_block_stop",
+                                "index": current_block_index
                             }
-                            yield f"event: content_block_delta\ndata: {json.dumps(think_close_delta, ensure_ascii=False)}\n\n"
+                            yield f"event: content_block_stop\ndata: {json.dumps(thinking_block_stop, ensure_ascii=False)}\n\n"
+                            current_block_index += 1
                         
                         for tc in delta['tool_calls']:
                             tc_id = tc.get('id', '')
@@ -675,30 +679,46 @@ class AnthropicAdapter:
                                     args_chunk = func['arguments']
                                     current_tool_calls[tc_index]['arguments'] += args_chunk
         
-        # 如果还在reasoning模式但流结束了，需要关闭<think>标签
-        if is_in_reasoning and not has_sent_think_close:
-            has_sent_think_close = True
-            think_close_delta = {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {
-                    "type": "text_delta",
-                    "text": "</think>\n\n"
+        # 流结束后的清理工作
+        
+        # 如果thinking块开始了但还没结束，先结束它
+        if thinking_block_started and not thinking_block_stopped:
+            thinking_block_stopped = True
+            thinking_block_stop = {
+                "type": "content_block_stop",
+                "index": current_block_index
+            }
+            yield f"event: content_block_stop\ndata: {json.dumps(thinking_block_stop, ensure_ascii=False)}\n\n"
+            current_block_index += 1
+        
+        # 如果没有任何text块开始（只有thinking或什么都没有），需要发送一个空的text块
+        if not text_block_started:
+            text_block_started = True
+            text_block_start = {
+                "type": "content_block_start",
+                "index": current_block_index,
+                "content_block": {
+                    "type": "text",
+                    "text": ""
                 }
             }
-            yield f"event: content_block_delta\ndata: {json.dumps(think_close_delta, ensure_ascii=False)}\n\n"
+            yield f"event: content_block_start\ndata: {json.dumps(text_block_start, ensure_ascii=False)}\n\n"
         
-        # 发送content_block_stop事件（文本块）
+        # 发送text块的content_block_stop事件
         content_block_stop = {
             "type": "content_block_stop",
-            "index": 0
+            "index": current_block_index
         }
         yield f"event: content_block_stop\ndata: {json.dumps(content_block_stop, ensure_ascii=False)}\n\n"
         
         
+        # 记录text块结束后的索引，用于工具调用块
+        text_block_index = current_block_index
+        current_block_index += 1
+        
         # 如果有工具调用，发送工具调用块
         for idx, tc in current_tool_calls.items():
-            block_index = idx + 1
+            block_index = current_block_index + idx
             
             # 解析参数
             arguments_str = tc['arguments']

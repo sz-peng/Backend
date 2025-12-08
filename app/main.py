@@ -163,6 +163,18 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
         """处理数据验证异常"""
+        # Dump 用户输入用于调试
+        inputdump = {
+            "method": request.method,
+            "url": str(request.url),
+            "path": request.url.path,
+            "query_params": dict(request.query_params),
+            "headers": dict(request.headers),
+            "body": exc.body if hasattr(exc, 'body') else None,
+        }
+        logger.warning(f"请求验证失败 - inputdump: {inputdump}")
+        logger.warning(f"验证错误详情: {exc.errors()}")
+        
         # 检查是否是 Anthropic API 端点
         if request.url.path.startswith("/v1/messages"):
             # 返回 Anthropic 格式的错误响应
@@ -180,7 +192,8 @@ def create_app() -> FastAPI:
                     "error": {
                         "type": "invalid_request_error",
                         "message": f"请求验证失败: {'; '.join(error_messages)}"
-                    }
+                    },
+                    "inputdump": inputdump
                 }
             )
         
@@ -189,7 +202,8 @@ def create_app() -> FastAPI:
             content={
                 "error_code": "VALIDATION_ERROR",
                 "message": "数据验证失败",
-                "details": exc.errors()
+                "details": exc.errors(),
+                "inputdump": inputdump
             }
         )
     

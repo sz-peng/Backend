@@ -131,6 +131,13 @@ class AnthropicResponseTextContent(BaseModel):
     text: str
 
 
+class AnthropicResponseThinkingContent(BaseModel):
+    """Anthropic响应思考内容块（Extended Thinking）"""
+    type: Literal["thinking"] = "thinking"
+    thinking: str
+    signature: Optional[str] = None  # 思考内容的签名（可选）
+
+
 class AnthropicResponseToolUseContent(BaseModel):
     """Anthropic响应工具使用内容块"""
     type: Literal["tool_use"] = "tool_use"
@@ -141,6 +148,7 @@ class AnthropicResponseToolUseContent(BaseModel):
 
 AnthropicResponseContentBlock = Union[
     AnthropicResponseTextContent,
+    AnthropicResponseThinkingContent,
     AnthropicResponseToolUseContent
 ]
 
