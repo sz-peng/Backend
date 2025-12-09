@@ -5,15 +5,16 @@ OpenAI兼容的API端点
 用户通过我们的key/token调用，我们再用plug-in key调用plug-in-api
 """
 from typing import List, Dict, Any, Optional
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps_flexible import get_user_flexible
 from app.api.deps import get_plugin_api_service, get_db_session, get_redis
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
-from app.services.kiro_service import KiroService
+from app.services.kiro_service import KiroService, UpstreamAPIError
 from app.schemas.plugin_api import ChatCompletionRequest
 from app.cache import RedisClient
 
@@ -76,6 +77,28 @@ async def list_models(
         return result
     except HTTPException:
         raise
+    except UpstreamAPIError as e:
+        # 返回上游API的错误消息
+        return JSONResponse(
+            status_code=e.status_code,
+            content={
+                "error": e.extracted_message,
+                "type": "api_error"
+            }
+        )
+    except httpx.HTTPStatusError as e:
+        # 直接返回上游API的原始响应（Antigravity服务）
+        upstream_response = getattr(e, 'response_data', None)
+        if upstream_response is None:
+            try:
+                upstream_response = e.response.json()
+            except Exception:
+                upstream_response = {"error": e.response.text}
+        
+        return JSONResponse(
+            status_code=e.response.status_code,
+            content=upstream_response
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -180,6 +203,28 @@ async def chat_completions(
             
     except HTTPException:
         raise
+    except UpstreamAPIError as e:
+        # 返回上游API的错误消息
+        return JSONResponse(
+            status_code=e.status_code,
+            content={
+                "error": e.extracted_message,
+                "type": "api_error"
+            }
+        )
+    except httpx.HTTPStatusError as e:
+        # 直接返回上游API的原始响应（Antigravity服务）
+        upstream_response = getattr(e, 'response_data', None)
+        if upstream_response is None:
+            try:
+                upstream_response = e.response.json()
+            except Exception:
+                upstream_response = {"error": e.response.text}
+        
+        return JSONResponse(
+            status_code=e.response.status_code,
+            content=upstream_response
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

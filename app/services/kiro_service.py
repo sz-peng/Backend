@@ -10,6 +10,7 @@ Kiro账号服务
 from typing import Optional, Dict, Any, List
 import httpx
 import logging
+import json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -21,6 +22,61 @@ logger = logging.getLogger(__name__)
 
 # 缓存 TTL（秒）
 PLUGIN_API_KEY_CACHE_TTL = 60
+
+
+class UpstreamAPIError(Exception):
+    """上游API错误，用于传递上游服务的错误信息"""
+    
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        upstream_response: Optional[Dict[str, Any]] = None
+    ):
+        self.status_code = status_code
+        self.message = message
+        self.upstream_response = upstream_response
+        # 尝试从上游响应中提取真正的错误消息
+        self.extracted_message = self._extract_message()
+        super().__init__(self.message)
+    
+    def _extract_message(self) -> str:
+        """从上游响应中提取错误消息"""
+        if not self.upstream_response:
+            return self.message
+        
+        # 尝试从 error 字段提取
+        error_field = self.upstream_response.get("error")
+        if error_field:
+            # 如果 error 是字符串，尝试解析其中的 JSON
+            if isinstance(error_field, str):
+                # 尝试提取 JSON 部分，格式如: "错误: 429 {\"message\":\"...\",\"reason\":null}"
+                import re
+                json_match = re.search(r'\{.*\}', error_field)
+                if json_match:
+                    try:
+                        inner_json = json.loads(json_match.group())
+                        if isinstance(inner_json, dict) and "message" in inner_json:
+                            return inner_json["message"]
+                    except (json.JSONDecodeError, Exception):
+                        pass
+                # 如果无法解析 JSON，返回整个 error 字符串
+                return error_field
+            # 如果 error 是字典
+            elif isinstance(error_field, dict):
+                if "message" in error_field:
+                    return error_field["message"]
+                return str(error_field)
+        
+        # 尝试从 message 字段提取
+        if "message" in self.upstream_response:
+            return self.upstream_response["message"]
+        
+        # 尝试从 detail 字段提取
+        if "detail" in self.upstream_response:
+            return self.upstream_response["detail"]
+        
+        return self.message
 
 
 class KiroService:
@@ -120,6 +176,9 @@ class KiroService:
             
         Returns:
             API响应
+            
+        Raises:
+            UpstreamAPIError: 当上游API返回错误时
         """
         api_key = await self._get_user_plugin_key(user_id)
         url = f"{self.base_url}{path}"
@@ -131,9 +190,32 @@ class KiroService:
                 url=url,
                 json=json_data,
                 params=params,
-                headers=headers,timeout=1200.0
+                headers=headers,
+                timeout=1200.0
             )
-            response.raise_for_status()
+            
+            if response.status_code >= 400:
+                # 尝试解析上游错误响应
+                upstream_response = None
+                try:
+                    upstream_response = response.json()
+                except Exception:
+                    try:
+                        upstream_response = {"raw": response.text}
+                    except Exception:
+                        pass
+                
+                logger.warning(
+                    f"上游API错误: status={response.status_code}, "
+                    f"url={url}, response={upstream_response}"
+                )
+                
+                raise UpstreamAPIError(
+                    status_code=response.status_code,
+                    message=f"上游API返回错误: {response.status_code}",
+                    upstream_response=upstream_response
+                )
+            
             return response.json()
     
     async def _proxy_stream_request(
@@ -154,6 +236,9 @@ class KiroService:
             
         Yields:
             流式响应数据
+            
+        Raises:
+            UpstreamAPIError: 当上游API返回错误时
         """
         api_key = await self._get_user_plugin_key(user_id)
         url = f"{self.base_url}{path}"
@@ -167,7 +252,29 @@ class KiroService:
                 headers=headers,
                 timeout=httpx.Timeout(1200.0, connect=60.0)
             ) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    # 读取错误响应体
+                    error_body = await response.aread()
+                    upstream_response = None
+                    try:
+                        upstream_response = json.loads(error_body.decode('utf-8'))
+                    except Exception:
+                        try:
+                            upstream_response = {"raw": error_body.decode('utf-8')}
+                        except Exception:
+                            upstream_response = {"raw": str(error_body)}
+                    
+                    logger.warning(
+                        f"上游API流式请求错误: status={response.status_code}, "
+                        f"url={url}, response={upstream_response}"
+                    )
+                    
+                    raise UpstreamAPIError(
+                        status_code=response.status_code,
+                        message=f"上游API返回错误: {response.status_code}",
+                        upstream_response=upstream_response
+                    )
+                
                 async for chunk in response.aiter_raw():
                     if chunk:
                         yield chunk
