@@ -240,33 +240,88 @@ class AnthropicAdapter:
     ) -> Dict[str, Any]:
         """
         转换包含tool_use的assistant消息
+        
+        特殊处理：当消息包含thinking块（带signature）后面跟着空文本或无文本，
+        然后是tool_use时，将thinking的signature转移到tool_use的extra_content中
         """
         text_parts = []
         tool_calls = []
+        thinking_content = None
+        thinking_signature = None
         
+        # 第一遍遍历：提取thinking内容和signature
+        for block in content:
+            block_type = cls._get_block_type(block)
+            
+            if block_type == 'thinking':
+                thinking_content = cls._get_block_attr(block, 'thinking', '')
+                thinking_signature = cls._get_block_attr(block, 'signature', None)
+        
+        # 检查是否需要转移signature到tool_use
+        # 条件：有thinking signature，且文本内容为空或只有"(no content)"
+        should_transfer_signature = False
+        if thinking_signature:
+            # 检查是否有有效的文本内容
+            has_meaningful_text = False
+            for block in content:
+                block_type = cls._get_block_type(block)
+                if block_type == 'text':
+                    text = cls._get_block_attr(block, 'text', '')
+                    # 空文本或"(no content)"不算有效文本
+                    if text and text.strip() and text.strip() != "(no content)":
+                        has_meaningful_text = True
+                        break
+            
+            # 检查是否有tool_use
+            has_tool_use = any(
+                cls._get_block_type(block) == 'tool_use'
+                for block in content
+            )
+            
+            should_transfer_signature = not has_meaningful_text and has_tool_use
+        
+        # 第二遍遍历：构建转换结果
         for block in content:
             block_type = cls._get_block_type(block)
             
             if block_type == 'text':
                 text = cls._get_block_attr(block, 'text', '')
-                text_parts.append(text)
+                # 跳过空文本和"(no content)"
+                if text and text.strip() and text.strip() != "(no content)":
+                    text_parts.append(text)
             elif block_type == 'tool_use':
                 tool_id = cls._get_block_attr(block, 'id', '')
                 tool_name = cls._get_block_attr(block, 'name', '')
                 tool_input = cls._get_block_attr(block, 'input', {})
-                tool_calls.append({
+                
+                tool_call = {
                     "id": tool_id,
                     "type": "function",
                     "function": {
                         "name": tool_name,
                         "arguments": json.dumps(tool_input) if isinstance(tool_input, dict) else str(tool_input)
                     }
-                })
+                }
+                
+                # 如果需要转移signature，添加到extra_content中
+                if should_transfer_signature and thinking_signature:
+                    tool_call["extra_content"] = {
+                        "google": {
+                            "thought_signature": thinking_signature
+                        }
+                    }
+                    logger.debug(f"将thinking signature转移到tool_use: {tool_name}")
+                
+                tool_calls.append(tool_call)
         
         result = {
             "role": "assistant",
             "content": "\n".join(text_parts) if text_parts else None,
         }
+        
+        # 如果有thinking内容，添加到reasoning_content
+        if thinking_content:
+            result["reasoning_content"] = thinking_content
         
         if tool_calls:
             result["tool_calls"] = tool_calls
@@ -390,6 +445,10 @@ class AnthropicAdapter:
             
         Returns:
             Anthropic格式的响应
+            
+        Note:
+            支持将OpenAI格式的reasoning_content转换为Anthropic的thinking content block格式，
+            并正确处理thought_signature
         """
         choice = openai_response.get("choices", [{}])[0]
         message = choice.get("message", {})
@@ -398,26 +457,69 @@ class AnthropicAdapter:
         # 转换内容
         content = []
         
+        # 处理reasoning_content（思考过程）- 必须在text内容之前
+        # 支持多种格式：reasoning_content, reasoning, thinking_content
+        reasoning_content = (
+            message.get("reasoning_content") or
+            message.get("reasoning") or
+            message.get("thinking_content")
+        )
+        
+        # 提取思考签名
+        thinking_signature = None
+        
+        # 从tool_calls中提取签名（Google/Gemini格式）
+        tool_calls = message.get("tool_calls", [])
+        for tool_call in tool_calls:
+            extra_content = tool_call.get("extra_content", {})
+            if extra_content:
+                google_extra = extra_content.get("google", {})
+                if google_extra and "thought_signature" in google_extra:
+                    thinking_signature = google_extra["thought_signature"]
+                    break
+                elif "thought_signature" in extra_content:
+                    thinking_signature = extra_content["thought_signature"]
+                    break
+        
+        # 从message级别提取签名
+        if not thinking_signature:
+            extra_content = message.get("extra_content", {})
+            if extra_content:
+                google_extra = extra_content.get("google", {})
+                if google_extra and "thought_signature" in google_extra:
+                    thinking_signature = google_extra["thought_signature"]
+                elif "thought_signature" in extra_content:
+                    thinking_signature = extra_content["thought_signature"]
+            # 直接在message中的signature
+            if not thinking_signature and "signature" in message:
+                thinking_signature = message["signature"]
+        
+        # 添加thinking内容块（如果有）
+        if reasoning_content:
+            content.append(AnthropicResponseThinkingContent(
+                thinking=reasoning_content,
+                signature=thinking_signature
+            ))
+        
         # 处理文本内容
         text_content = message.get("content")
         if text_content:
             content.append(AnthropicResponseTextContent(text=text_content))
         
         # 处理工具调用
-        tool_calls = message.get("tool_calls", [])
         for tool_call in tool_calls:
             if tool_call.get("type") == "function":
                 func = tool_call.get("function", {})
-                arguments_str = func.get("arguments", "{}")
+                arguments_str = func.get("arguments", "{}") or "{}"  # 处理空字符串情况
                 
                 try:
                     input_data = json.loads(arguments_str)
                 except json.JSONDecodeError as e:
                     # 记录解析失败的详细信息
-                    logger.error(f"工具调用参数JSON解析失败: {e}")
-                    logger.error(f"原始arguments字符串: {arguments_str}")
-                    logger.error(f"工具名称: {func.get('name', 'unknown')}")
-                    logger.error(f"工具调用ID: {tool_call.get('id', 'unknown')}")
+                    logger.warning(f"工具调用参数JSON解析失败: {e}")
+                    logger.warning(f"原始arguments字符串: '{arguments_str}'")
+                    logger.warning(f"工具名称: {func.get('name', 'unknown')}")
+                    logger.warning(f"工具调用ID: {tool_call.get('id', 'unknown')}")
                     input_data = {}
                 
                 content.append(AnthropicResponseToolUseContent(
@@ -494,6 +596,7 @@ class AnthropicAdapter:
         # 跟踪状态
         accumulated_text = ""
         accumulated_thinking = ""
+        thinking_signature = ""  # 思考内容的签名
         input_tokens = 0
         output_tokens = 0
         finish_reason = None
@@ -586,6 +689,36 @@ class AnthropicAdapter:
                         }
                         yield f"event: content_block_delta\ndata: {json.dumps(thinking_delta_event, ensure_ascii=False)}\n\n"
                     
+                    # 提取思考签名（thought_signature）
+                    # 支持多种上游格式：
+                    # 1. tool_calls[].extra_content.google.thought_signature (Google/Gemini格式)
+                    # 2. delta.extra_content.thought_signature
+                    # 3. delta.signature
+                    if 'tool_calls' in delta:
+                        for tc in delta['tool_calls']:
+                            extra_content = tc.get('extra_content', {})
+                            if extra_content:
+                                # Google/Gemini格式
+                                google_extra = extra_content.get('google', {})
+                                if google_extra and 'thought_signature' in google_extra:
+                                    thinking_signature = google_extra['thought_signature']
+                                # 通用格式
+                                elif 'thought_signature' in extra_content:
+                                    thinking_signature = extra_content['thought_signature']
+                    
+                    # 检查delta级别的签名
+                    if not thinking_signature:
+                        extra_content = delta.get('extra_content', {})
+                        if extra_content:
+                            google_extra = extra_content.get('google', {})
+                            if google_extra and 'thought_signature' in google_extra:
+                                thinking_signature = google_extra['thought_signature']
+                            elif 'thought_signature' in extra_content:
+                                thinking_signature = extra_content['thought_signature']
+                        # 直接在delta中的signature
+                        if not thinking_signature and 'signature' in delta:
+                            thinking_signature = delta['signature']
+                    
                     # 处理文本内容
                     if 'content' in delta and delta['content']:
                         text_delta = delta['content']
@@ -593,6 +726,19 @@ class AnthropicAdapter:
                         # 如果之前有thinking内容且thinking块还没结束，先结束thinking块
                         if thinking_block_started and not thinking_block_stopped:
                             thinking_block_stopped = True
+                            
+                            # 如果有签名，先发送签名delta
+                            if thinking_signature:
+                                signature_delta_event = {
+                                    "type": "content_block_delta",
+                                    "index": current_block_index,
+                                    "delta": {
+                                        "type": "signature_delta",
+                                        "signature": thinking_signature
+                                    }
+                                }
+                                yield f"event: content_block_delta\ndata: {json.dumps(signature_delta_event, ensure_ascii=False)}\n\n"
+                            
                             # 发送thinking块的content_block_stop
                             thinking_block_stop = {
                                 "type": "content_block_stop",
@@ -633,6 +779,19 @@ class AnthropicAdapter:
                         # 如果之前有thinking内容且thinking块还没结束，先结束thinking块
                         if thinking_block_started and not thinking_block_stopped:
                             thinking_block_stopped = True
+                            
+                            # 如果有签名，先发送签名delta
+                            if thinking_signature:
+                                signature_delta_event = {
+                                    "type": "content_block_delta",
+                                    "index": current_block_index,
+                                    "delta": {
+                                        "type": "signature_delta",
+                                        "signature": thinking_signature
+                                    }
+                                }
+                                yield f"event: content_block_delta\ndata: {json.dumps(signature_delta_event, ensure_ascii=False)}\n\n"
+                            
                             thinking_block_stop = {
                                 "type": "content_block_stop",
                                 "index": current_block_index
@@ -684,6 +843,19 @@ class AnthropicAdapter:
         # 如果thinking块开始了但还没结束，先结束它
         if thinking_block_started and not thinking_block_stopped:
             thinking_block_stopped = True
+            
+            # 如果有签名，先发送签名delta
+            if thinking_signature:
+                signature_delta_event = {
+                    "type": "content_block_delta",
+                    "index": current_block_index,
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": thinking_signature
+                    }
+                }
+                yield f"event: content_block_delta\ndata: {json.dumps(signature_delta_event, ensure_ascii=False)}\n\n"
+            
             thinking_block_stop = {
                 "type": "content_block_stop",
                 "index": current_block_index
@@ -721,15 +893,15 @@ class AnthropicAdapter:
             block_index = current_block_index + idx
             
             # 解析参数
-            arguments_str = tc['arguments']
+            arguments_str = tc['arguments'] or "{}"  # 处理空字符串情况
             try:
-                input_data = json.loads(arguments_str) if arguments_str else {}
+                input_data = json.loads(arguments_str) if arguments_str and arguments_str.strip() else {}
             except json.JSONDecodeError as e:
                 # 记录解析失败的详细信息
-                logger.error(f"流式响应工具调用参数JSON解析失败: {e}")
-                logger.error(f"原始arguments字符串: {arguments_str}")
-                logger.error(f"工具名称: {tc['name']}")
-                logger.error(f"工具调用ID: {tc['id']}")
+                logger.warning(f"流式响应工具调用参数JSON解析失败: {e}")
+                logger.warning(f"原始arguments字符串: '{arguments_str}'")
+                logger.warning(f"工具名称: {tc['name']}")
+                logger.warning(f"工具调用ID: {tc['id']}")
                 input_data = {}
             
             # content_block_start for tool_use
