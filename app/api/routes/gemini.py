@@ -1,7 +1,7 @@
 """
 Gemini兼容的API端点
 支持Gemini API格式的图片生成 (/v1beta/models/{model}:generateContent)
-支持图生图功能和SSE流式响应（心跳保活）
+支持图生图功能和SSE流式响应（每20秒心跳保活）
 """
 from typing import Optional
 import logging
@@ -97,12 +97,18 @@ async def generate_content(
     ```
     
     **响应格式（SSE流式）:**
-    响应使用 Server-Sent Events (SSE) 格式，包含心跳保活机制（每30秒发送心跳）。
+    响应使用 Server-Sent Events (SSE) 格式，包含心跳保活机制（每20秒发送心跳）。
     
     SSE事件类型:
-    - `heartbeat`: 心跳事件，用于保持连接活跃
+    - `heartbeat`: 心跳事件，用于保持连接活跃，数据格式: `{"status": "still generating"}`
     - `result`: 最终结果，包含生成的图片数据
-    - `error`: 错误事件
+    - `error`: 错误事件，包含上游错误信息
+    
+    心跳事件示例:
+    ```
+    event: heartbeat
+    data: {"status": "still generating"}
+    ```
     
     最终结果格式:
     ```json
@@ -112,6 +118,7 @@ async def generate_content(
           "content": {
             "parts": [
               {
+                "thoughtSignature": "<SIGNATURE>",
                 "inlineData": {
                   "mimeType": "image/jpeg",
                   "data": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDA..."
@@ -126,7 +133,14 @@ async def generate_content(
     }
     ```
     
+    错误事件示例:
+    ```
+    event: error
+    data: {"error": {"message": "错误信息", "type": "upstream_error", "code": 500}}
+    ```
+    
     响应字段说明:
+    - candidates[0].content.parts[0].thoughtSignature: 思考签名（可选）
     - candidates[0].content.parts[0].inlineData.data: Base64 编码的图片数据
     - candidates[0].content.parts[0].inlineData.mimeType: 图片 MIME 类型，例如 image/jpeg
     """

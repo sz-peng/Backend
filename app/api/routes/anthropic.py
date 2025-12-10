@@ -238,19 +238,28 @@ async def create_message(
             )
         else:
             # 非流式请求
+            # 上游总是返回流式响应，所以使用流式接口获取并收集响应
+            
             if use_kiro:
-                openai_response = await kiro_service.chat_completions(
+                # 使用Kiro服务的流式接口
+                openai_stream = kiro_service.chat_completions_stream(
                     user_id=current_user.id,
                     request_data=openai_request
                 )
             else:
-                openai_response = await antigravity_service.proxy_request(
+                # 使用Antigravity服务的流式接口
+                openai_stream = antigravity_service.proxy_stream_request(
                     user_id=current_user.id,
                     method="POST",
                     path="/v1/chat/completions",
                     json_data=openai_request,
                     extra_headers=extra_headers if extra_headers else None
                 )
+            
+            # 收集流式响应并转换为完整的OpenAI响应
+            openai_response = await AnthropicAdapter.collect_openai_stream_to_response(
+                openai_stream
+            )
             
             # 转换响应为Anthropic格式
             anthropic_response = AnthropicAdapter.openai_to_anthropic_response(

@@ -2,11 +2,12 @@
 Anthropic格式转换器服务
 将Anthropic Messages API格式转换为OpenAI格式，并将OpenAI响应转换回Anthropic格式
 """
-from typing import Optional, Dict, Any, List, Union, AsyncGenerator
+from typing import Optional, Dict, Any, List, Union, AsyncGenerator, Tuple
 import json
 import uuid
 import time
 import logging
+import re
 
 from app.schemas.anthropic import (
     AnthropicMessagesRequest,
@@ -945,6 +946,9 @@ class AnthropicAdapter:
             stop_reason = "end_turn"
         
         # 发送message_delta事件
+        # 注意：Anthropic官方格式中，message_delta的usage只包含output_tokens
+        # 但由于上游流式响应中usage信息在最后才出现，我们在这里也包含input_tokens
+        # 以便客户端能获取完整的usage信息
         message_delta = {
             "type": "message_delta",
             "delta": {
@@ -952,6 +956,7 @@ class AnthropicAdapter:
                 "stop_sequence": None
             },
             "usage": {
+                "input_tokens": input_tokens,
                 "output_tokens": output_tokens
             }
         }
@@ -962,6 +967,264 @@ class AnthropicAdapter:
             "type": "message_stop"
         }
         yield f"event: message_stop\ndata: {json.dumps(message_stop, ensure_ascii=False)}\n\n"
+    
+    @classmethod
+    async def collect_openai_stream_to_response(
+        cls,
+        openai_stream: AsyncGenerator[bytes, None]
+    ) -> Dict[str, Any]:
+        """
+        将OpenAI流式响应收集并转换为完整的非流式响应格式
+        
+        当用户请求非流式响应（stream=false），但上游总是返回流式响应时，
+        使用此方法将流式响应收集并组装成完整的响应。
+        
+        Args:
+            openai_stream: OpenAI流式响应生成器
+            
+        Returns:
+            OpenAI格式的完整响应字典
+        """
+        # 跟踪状态
+        accumulated_text = ""
+        accumulated_reasoning = ""
+        thinking_signature = ""
+        input_tokens = 0
+        output_tokens = 0
+        finish_reason = None
+        model = ""
+        response_id = ""
+        tool_calls = {}  # 跟踪工具调用 {index: {id, name, arguments}}
+        
+        buffer = ""
+        chunk_count = 0
+        
+        
+        async for chunk in openai_stream:
+            chunk_count += 1
+            # 解码chunk
+            if isinstance(chunk, bytes):
+                chunk_str = chunk.decode('utf-8')
+                buffer += chunk_str
+            else:
+                chunk_str = chunk
+                buffer += chunk
+        
+        # 流结束后，检查buffer中的内容
+        # 可能是SSE格式（data: {...}）或者直接的JSON响应
+        full_content = buffer.strip()
+        
+        # 首先尝试解析为完整的JSON响应（非流式响应）
+        if full_content and not full_content.startswith('data:'):
+            try:
+                # 尝试直接解析为JSON
+                data = json.loads(full_content)
+                
+                # 这是一个完整的chat.completion响应，直接返回
+                if data.get('object') == 'chat.completion':
+                    return data
+                
+                # 如果是流式chunk格式但没有data:前缀
+                if 'choices' in data:
+                    choice = data.get('choices', [{}])[0]
+                    message = choice.get('message', {})
+                    delta = choice.get('delta', {})
+                    
+                    # 提取基本信息
+                    response_id = data.get('id', response_id)
+                    model = data.get('model', model)
+                    
+                    # 提取usage
+                    if 'usage' in data:
+                        usage_data = data['usage']
+                        input_tokens = usage_data.get('prompt_tokens', input_tokens)
+                        output_tokens = usage_data.get('completion_tokens', output_tokens)
+                    
+                    # 提取内容（从message或delta）
+                    content = message.get('content') or delta.get('content')
+                    if content:
+                        accumulated_text = content
+                    
+                    # 提取finish_reason
+                    finish_reason = choice.get('finish_reason', finish_reason)
+                    
+            except json.JSONDecodeError:
+                pass
+        
+        # 处理SSE格式的数据
+        for line in full_content.split('\n'):
+            line = line.strip()
+            
+            if not line:
+                continue
+            
+            if line.startswith('data: '):
+                data_str = line[6:]
+                
+                if data_str == '[DONE]':
+                    continue
+                
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                
+                # 提取基本信息
+                if 'id' in data and not response_id:
+                    response_id = data['id']
+                if 'model' in data and not model:
+                    model = data['model']
+                
+                # 提取usage信息（可能在任何chunk中，包括最后一个只有usage的chunk）
+                if 'usage' in data:
+                    usage_data = data['usage']
+                    input_tokens = usage_data.get('prompt_tokens', input_tokens)
+                    output_tokens = usage_data.get('completion_tokens', output_tokens)
+                
+                # 也检查x_groq格式的usage（某些上游服务使用）
+                if 'x_groq' in data and 'usage' in data['x_groq']:
+                    usage_data = data['x_groq']['usage']
+                    input_tokens = usage_data.get('prompt_tokens', input_tokens)
+                    output_tokens = usage_data.get('completion_tokens', output_tokens)
+                
+                choices = data.get('choices', [])
+                if not choices:
+                    continue
+                
+                choice = choices[0]
+                delta = choice.get('delta', {})
+                
+                # 检查finish_reason
+                if choice.get('finish_reason'):
+                    finish_reason = choice['finish_reason']
+                
+                # 处理reasoning_content（思考过程）
+                reasoning_delta = (
+                    delta.get('reasoning_content') or
+                    delta.get('reasoning') or
+                    delta.get('thinking_content')
+                )
+                if reasoning_delta:
+                    accumulated_reasoning += reasoning_delta
+                
+                # 提取思考签名
+                if 'tool_calls' in delta:
+                    for tc in delta['tool_calls']:
+                        extra_content = tc.get('extra_content', {})
+                        if extra_content:
+                            google_extra = extra_content.get('google', {})
+                            if google_extra and 'thought_signature' in google_extra:
+                                thinking_signature = google_extra['thought_signature']
+                            elif 'thought_signature' in extra_content:
+                                thinking_signature = extra_content['thought_signature']
+                
+                # 检查delta级别的签名
+                if not thinking_signature:
+                    extra_content = delta.get('extra_content', {})
+                    if extra_content:
+                        google_extra = extra_content.get('google', {})
+                        if google_extra and 'thought_signature' in google_extra:
+                            thinking_signature = google_extra['thought_signature']
+                        elif 'thought_signature' in extra_content:
+                            thinking_signature = extra_content['thought_signature']
+                    if not thinking_signature and 'signature' in delta:
+                        thinking_signature = delta['signature']
+                
+                # 处理文本内容
+                if 'content' in delta and delta['content']:
+                    accumulated_text += delta['content']
+                
+                # 处理工具调用
+                if 'tool_calls' in delta:
+                    for tc in delta['tool_calls']:
+                        tc_index = tc.get('index', 0)
+                        tc_id = tc.get('id', '')
+                        
+                        # 首先尝试通过id查找已存在的工具调用
+                        found_index = None
+                        if tc_id:
+                            for idx, existing_tc in tool_calls.items():
+                                if existing_tc['id'] == tc_id:
+                                    found_index = idx
+                                    break
+                        
+                        if found_index is not None:
+                            tc_index = found_index
+                        elif tc_id and tc_id not in [t['id'] for t in tool_calls.values() if t['id']]:
+                            tc_index = len(tool_calls)
+                        
+                        if tc_index not in tool_calls:
+                            tool_calls[tc_index] = {
+                                'id': tc_id,
+                                'name': '',
+                                'arguments': ''
+                            }
+                        
+                        if 'id' in tc and tc['id']:
+                            tool_calls[tc_index]['id'] = tc['id']
+                        
+                        if 'function' in tc:
+                            func = tc['function']
+                            if 'name' in func:
+                                tool_calls[tc_index]['name'] = func['name']
+                            if 'arguments' in func:
+                                tool_calls[tc_index]['arguments'] += func['arguments']
+        
+        # 构建完整的OpenAI响应
+        message = {
+            "role": "assistant",
+            "content": accumulated_text if accumulated_text else None
+        }
+        
+        # 添加reasoning_content
+        if accumulated_reasoning:
+            message["reasoning_content"] = accumulated_reasoning
+        
+        # 添加签名
+        if thinking_signature:
+            message["signature"] = thinking_signature
+        
+        # 添加工具调用
+        if tool_calls:
+            message["tool_calls"] = []
+            for idx in sorted(tool_calls.keys()):
+                tc = tool_calls[idx]
+                message["tool_calls"].append({
+                    "id": tc['id'] or f"call_{uuid.uuid4().hex[:24]}",
+                    "type": "function",
+                    "function": {
+                        "name": tc['name'],
+                        "arguments": tc['arguments']
+                    }
+                })
+        
+        # 确定finish_reason
+        if not finish_reason:
+            if tool_calls:
+                finish_reason = "tool_calls"
+            else:
+                finish_reason = "stop"
+        
+        response = {
+            "id": response_id or f"chatcmpl-{uuid.uuid4().hex[:24]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": finish_reason
+                }
+            ],
+            "usage": {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens
+            }
+        }
+        
+        return response
     
     @classmethod
     def create_error_response(

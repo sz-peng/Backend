@@ -15,6 +15,7 @@ from app.api.deps import get_plugin_api_service, get_db_session, get_redis
 from app.models.user import User
 from app.services.plugin_api_service import PluginAPIService
 from app.services.kiro_service import KiroService, UpstreamAPIError
+from app.services.anthropic_adapter import AnthropicAdapter
 from app.schemas.plugin_api import ChatCompletionRequest
 from app.cache import RedisClient
 
@@ -186,19 +187,25 @@ async def chat_completions(
             )
         else:
             # 非流式请求
+            # 上游总是返回流式响应，所以使用流式接口获取并收集响应
             if use_kiro:
-                result = await kiro_service.chat_completions(
+                openai_stream = kiro_service.chat_completions_stream(
                     user_id=current_user.id,
                     request_data=request.model_dump()
                 )
             else:
-                result = await antigravity_service.proxy_request(
+                openai_stream = antigravity_service.proxy_stream_request(
                     user_id=current_user.id,
                     method="POST",
                     path="/v1/chat/completions",
                     json_data=request.model_dump(),
                     extra_headers=extra_headers if extra_headers else None
                 )
+            
+            # 收集流式响应并转换为完整的OpenAI响应
+            result = await AnthropicAdapter.collect_openai_stream_to_response(
+                openai_stream
+            )
             return result
             
     except HTTPException:

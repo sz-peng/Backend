@@ -9,6 +9,8 @@ Plug-in API服务
 from typing import Optional, Dict, Any, List
 import httpx
 import logging
+import asyncio
+import json
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -723,6 +725,9 @@ class PluginAPIService:
         """
         图片生成API流式版本（Gemini格式）
         
+        调用非流式上游接口 /v1beta/models/{model}:generateContent，
+        但以SSE流式方式响应给用户，在等待上游响应时每20秒发送心跳。
+        
         Args:
             user_id: 用户ID
             model: 模型名称
@@ -730,21 +735,126 @@ class PluginAPIService:
             config_type: 账号类型（可选）
             
         Yields:
-            流式响应数据
+            SSE格式的流式响应数据
         """
-        # 构建请求路径（流式使用streamGenerateContent）
-        path = f"/v1beta/models/{model}:streamGenerateContent"
+        # 获取用户的API密钥
+        api_key = await self.get_user_api_key(user_id)
+        if not api_key:
+            error_response = {
+                "error": {
+                    "message": "用户未配置plug-in API密钥",
+                    "type": "authentication_error",
+                    "code": 401
+                }
+            }
+            yield f"event: error\ndata: {json.dumps(error_response)}\n\n"
+            return
         
-        # 准备额外的请求头
-        extra_headers = {}
+        # 更新最后使用时间
+        await self.update_last_used(user_id)
+        
+        # 构建请求路径（非流式接口）
+        path = f"/v1beta/models/{model}:generateContent"
+        url = f"{self.base_url}{path}"
+        
+        # 准备请求头
+        headers = {"Authorization": f"Bearer {api_key}"}
         if config_type:
-            extra_headers["X-Account-Type"] = config_type
+            headers["X-Account-Type"] = config_type
         
-        async for chunk in self.proxy_stream_request(
-            user_id=user_id,
-            method="POST",
-            path=path,
-            json_data=request_data,
-            extra_headers=extra_headers if extra_headers else None
-        ):
-            yield chunk
+        # 心跳间隔（秒）
+        heartbeat_interval = 20
+        
+        async def make_request():
+            """发起上游请求"""
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    url,
+                    json=request_data,
+                    headers=headers,
+                    timeout=httpx.Timeout(1200.0, connect=60.0)
+                )
+                return response
+        
+        # 创建上游请求任务
+        request_task = asyncio.create_task(make_request())
+        
+        try:
+            while True:
+                try:
+                    # 等待请求完成，最多等待 heartbeat_interval 秒
+                    response = await asyncio.wait_for(
+                        asyncio.shield(request_task),
+                        timeout=heartbeat_interval
+                    )
+                    
+                    # 请求完成，处理响应
+                    if response.status_code >= 400:
+                        # 上游返回错误，转发错误
+                        try:
+                            error_data = response.json()
+                        except Exception:
+                            error_data = {"detail": response.text}
+                        
+                        logger.error(f"上游API返回错误: status={response.status_code}, url={url}, error={error_data}")
+                        
+                        # 提取错误消息
+                        error_message = None
+                        if isinstance(error_data, dict):
+                            if "detail" in error_data:
+                                error_message = error_data["detail"]
+                            elif "error" in error_data:
+                                error_field = error_data["error"]
+                                if isinstance(error_field, str):
+                                    error_message = error_field
+                                elif isinstance(error_field, dict):
+                                    error_message = error_field.get("message") or str(error_field)
+                                else:
+                                    error_message = str(error_field)
+                            elif "message" in error_data:
+                                error_message = error_data["message"]
+                        
+                        if not error_message:
+                            error_message = str(error_data)
+                        
+                        error_response = {
+                            "error": {
+                                "message": error_message,
+                                "type": "upstream_error",
+                                "code": response.status_code
+                            }
+                        }
+                        yield f"event: error\ndata: {json.dumps(error_response)}\n\n"
+                    else:
+                        # 成功响应，发送结果
+                        result_data = response.json()
+                        yield f"event: result\ndata: {json.dumps(result_data)}\n\n"
+                    
+                    # 请求完成，退出循环
+                    break
+                    
+                except asyncio.TimeoutError:
+                    # 超时，发送心跳
+                    heartbeat_data = {"status": "still generating"}
+                    yield f"event: heartbeat\ndata: {json.dumps(heartbeat_data)}\n\n"
+                    # 继续等待
+                    
+        except asyncio.CancelledError:
+            # 客户端断开连接，取消上游请求
+            request_task.cancel()
+            try:
+                await request_task
+            except asyncio.CancelledError:
+                pass
+            raise
+        except Exception as e:
+            # 其他异常
+            logger.error(f"图片生成流式请求失败: {str(e)}")
+            error_response = {
+                "error": {
+                    "message": str(e),
+                    "type": "internal_error",
+                    "code": 500
+                }
+            }
+            yield f"event: error\ndata: {json.dumps(error_response)}\n\n"
